@@ -1,0 +1,16 @@
+;; The unit suite. `nbb --classpath "src:test:<inga>/src" script/test.cljs`
+;;
+;; Separate from `script/devnet.cljs`, which spawns processes and takes a
+;; minute: a suite nobody runs because it is slow is a suite nobody runs.
+(ns test-runner
+  (:require [clojure.test :as t]
+            [inga-node.seams-test]
+            [inga-node.store-test]))
+
+;; cljs.test already prints the summary; this only makes a failure EXIT
+;; non-zero, which is what a runner is for. Printing it twice would be a
+;; runner competing with its own library.
+(defmethod t/report [:cljs.test/default :end-run-tests] [m]
+  (when (pos? (+ (:fail m) (:error m))) (js/process.exit 1)))
+
+(t/run-tests 'inga-node.seams-test 'inga-node.store-test)

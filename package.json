@@ -2,5 +2,10 @@
   "name": "inga-node",
   "private": true,
   "type": "module",
-  "dependencies": { "ws": "^8.18.0" }
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "scripts": {
+    "test": "nbb --classpath \"src:test:$INGA_SRC\" script/test.cljs"
+  }
 }

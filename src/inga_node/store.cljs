@@ -71,9 +71,19 @@
 ;; ── the shared committed log ────────────────────────────────────────────────
 
 (defn- pad
-  "Zero-padded to 12 digits so directory order IS sequence order. A bare 10
-  sorts before 9 and the contiguous walk below would stop at a gap that is
-  not one."
+  "Zero-padded to 12 digits so a LEXICOGRAPHIC listing is sequence order.
+
+  `head-of` does not need this — it parses the number out of each filename
+  and sorts numerically, so it is immune to `ls` putting 10 before 9. The
+  padding is for everything that lists WITHOUT parsing: a human reading the
+  directory, an object store's `list` (the shared-log sibling in
+  `net-kotobase` pages through keys in lexicographic order), and any future
+  consumer that assumes the obvious.
+
+  Stated this way because the first version claimed the contiguous walk
+  depended on it, and a test written against that claim passed with the
+  padding removed — the claim was false and the test was checking something
+  else."
   [n]
   (let [s (str n)]
     (str (str/join "" (repeat (max 0 (- 12 (count s))) "0")) s)))

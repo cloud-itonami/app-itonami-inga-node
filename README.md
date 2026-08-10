@@ -109,5 +109,17 @@ script/devnet.cljs           seven processes and a kill
 ## Test
 
 ```bash
-nbb --classpath "src:../inga/src" script/devnet.cljs
+INGA_SRC=../inga/src npm test          # 20 unit tests, ~2s
+nbb --classpath "src:../inga/src" script/devnet.cljs   # 7 processes, ~1min
 ```
+
+The unit suite covers the three pieces that REPLACE the Durable Object —
+`seams` (the crypto, including the DER splice that would otherwise fail
+silently), `identity` (the seed minted locally, 0600, stable across restarts)
+and `store` (snapshot atomicity, first-write-wins, the contiguous head walk).
+
+Each was checked by breaking it: one byte off the DER prefix fails three
+assertions. One that did NOT bite is recorded rather than quietly fixed — the
+zero-padding turned out not to be load-bearing for `head-of`, which parses
+numbers instead of comparing filenames, so the docstring claiming otherwise
+was wrong and now says so.
