@@ -99,6 +99,28 @@ leg proved nothing; `node-test` checks it directly — submit, stop, start again
 on the same directory, and the queued work is still there. Disabling
 `read-snapshot` turns that test red.
 
+## Standing witnesses up on a fleet
+
+```bash
+nbb script/fleet.cljs pubkeys judah,benjamin,simeon,joseph
+nbb script/fleet.cljs config  judah,benjamin,simeon,joseph
+```
+
+`pubkeys` mints `~/.inga/<witness>/seed` on each host if it is absent, 0600,
+and prints the PUBLIC half. **Nothing secret crosses the link in either
+direction.** Re-running is idempotent — the same four public keys come back,
+because an identity that changes on every provisioning run is not an identity.
+
+Measured 2026-08-11 on four murakumo nodes: four keys, four machines,
+`-rw-------` on each seed. That is what makes the fault-model claim real
+rather than aspirational — four machines that each generated their own key
+have a threshold to cross; four Durable Objects sharing one `env` do not.
+
+`config` prints the `INGA_WITNESSES` / `INGA_PUBKEYS` / per-node `INGA_PEERS`
+strings. Peers are addressed by tailnet address: **bare hostnames do not
+resolve on the nodes themselves** (`ping benjamin` → Unknown host, measured),
+only `tailscale ping` does.
+
 ## Layout
 
 ```
