@@ -1,0 +1,228 @@
+(ns inga-node.node
+  "One witness, one process, one socket to every peer.
+
+  `inga` decides; this executes. Nothing here casts a vote, orders a block or
+  chooses a leader — `inga.replica` does all of that as a pure fold, and this
+  file is the part with a clock, a socket and a disk.
+
+  ## What a process gives that a Durable Object was being asked for
+
+  | DO | here |
+  |---|---|
+  | one writer per witness | **the process is one writer.** No lease, no fencing epoch |
+  | an address | a port |
+  | a bounded snapshot | a file (`inga-node.store`) |
+
+  The first row is the whole reason the DO was reached for, and it is free
+  here: a witness is a single-threaded state machine and so is a Node
+  process, so the property arrives by construction rather than by asking a
+  vendor for it.
+
+  ## The tick is ours now
+
+  The Worker deployment could only be driven by a Cloudflare cron, whose
+  floor is one minute, and the pacemaker's view budget has to outlast
+  whatever drives it — so that deployment could not have a view shorter than
+  two minutes, and took ~91 seconds to commit a write. Here the interval is a
+  `setInterval` we choose — and the view budget is derived from THAT
+  rather than from a vendor's cron floor. See `:params` below for what the
+  ratio has to be and what it cost to find out."
+  (:require [clojure.string :as str]
+            ["ws" :as ws]
+            ["node:http" :as http]
+            [inga.replica :as r]
+            [inga.consensus :as c]
+            [inga.wire :as wire]
+            [inga.net.ws :as nws]
+            [inga.net.server :as srv]
+            [inga-node.seams :as seams]
+            [inga-node.store :as store]))
+
+(defn- now [] (.getTime (js/Date.)))
+
+(defn- json-res [res status obj]
+  (.writeHead res status #js {"content-type" "application/json"})
+  (.end res (js/JSON.stringify (clj->js obj))))
+
+(defn start!
+  "Run one witness. `cfg`:
+
+    :witness    \"w1\"
+    :witnesses  [\"w1\" \"w2\" ...]
+    :peers      {\"w2\" \"ws://host:port\" ...}   (this witness excluded)
+    :pubkeys    {\"w1\" \"<hex>\" ...}
+    :seed-hex   this witness's private seed
+    :chain-id   string
+    :port       int
+    :tick-ms    int
+    :data-dir   string
+
+  Returns `{:stop! fn :state atom}`."
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port tick-ms view-ms data-dir]}]
+  (let [opts {:witness witness
+              :witnesses witnesses
+              :quorum (c/quorum-size (count witnesses))
+              :chain-id chain-id
+              ;; The view budget has to cover a whole ROUND, not a tick.
+              ;;
+              ;; Two ticks was the first guess and it is wrong: a round is
+              ;; propose, vote, certify, and under churn it is that again
+              ;; after a view led by a witness that is gone. Measured here —
+              ;; seven processes, budget = 2 x tick — the chain ran fine
+              ;; until one witness was killed and then froze at height 43
+              ;; while views kept turning over, which is the same starvation
+              ;; signature the Worker deployment had, one layer up.
+              ;;
+              ;; The default is eight ticks, which is the ratio `inga`'s own
+              ;; harness runs at (120ms ticks against a 1000ms budget) and
+              ;; the only configuration anybody has watched survive a
+              ;; Byzantine validator for a hundred blocks.
+              :params {:base-timeout (or view-ms (* 8 tick-ms)) :max-doublings 6}
+              :hash-fn seams/hash-fn
+              :sign-fn (seams/sign-fn seed-hex)
+              :verify-fn (seams/verify-fn pubkeys)}
+        snap (store/read-snapshot data-dir)
+        state (atom (if snap
+                      (try (r/resume opts snap)
+                           (catch :default e
+                             (js/console.warn "inga-node: resume refused —"
+                                              (.-message e) "— starting cold")
+                             (r/replica opts)))
+                      (r/replica opts)))
+        registry (atom {})
+        out-node (atom nil)
+        counts (atom {:sent 0 :recv 0})]
+    (letfn [(persist! [before]
+              ;; The sink lives HERE, next to the only place `:committed` can
+              ;; grow, rather than at each caller. A decision centralised in
+              ;; one function but invoked from three call sites is a plane
+              ;; that is on in two of them.
+              (let [s @state
+                    fresh (vec (drop before (:committed s)))]
+                (when (seq fresh) (store/sink-blocks! data-dir fresh))
+                (store/write-snapshot! data-dir (r/snapshot s))))
+
+            (ship! [outbox]
+              ;; BROADCAST, ignoring `:to`, because that is what `inga`'s own
+              ;; harness does and matching the only configuration anyone has
+              ;; watched run is worth more than an optimisation.
+              ;;
+              ;; It is NOT a fix for the departure stall below. Honouring
+              ;; `:to` was the third of three guesses at that, and switching
+              ;; to broadcast changed nothing — measured, same freeze at the
+              ;; same place. The reason it stays is the first sentence, not
+              ;; the second.
+              ;;
+              ;; Both halves of the mesh, because a peer we dialled and a
+              ;; peer that dialled us are different sockets and reaching one
+              ;; set is reaching half the network.
+              (doseq [{:keys [msg]} outbox]
+                (swap! counts update :sent inc)
+                (when-let [n @out-node] ((:broadcast! n) msg))
+                (doseq [[_ s] @registry]
+                  (when (:send! s) ((:send! s) msg)))))
+
+            (advance! [f]
+              (let [before (count (:committed @state))
+                    [s' out] (f @state)]
+                (reset! state s')
+                (ship! out)
+                (persist! before)))
+
+            (feed! [msg]
+              (swap! counts update :recv inc)
+              (advance! #(r/on-message % msg (now))))
+
+            (tick! []
+              (when-let [n @out-node] ((:tick! n)))
+              (let [s @state]
+                (when (and (empty? (:committed s)) (zero? (r/height s)))
+                  (advance! #(r/start % (now)))))
+              (advance! #(r/on-tick % (now))))]
+
+      (let [server (http/createServer
+                    (fn [req res]
+                      (let [url (js/URL. (.-url req) "http://localhost")
+                            p (.-pathname url)]
+                        (cond
+                          (= p "/health")
+                          (let [s @state]
+                            (json-res res 200
+                                      {:ok true :service "inga-node" :witness witness
+                                       :chain-id chain-id
+                                       ;; Named, not implied: what the fault model IS
+                                       ;; depends on where the keys live, and here each
+                                       ;; witness generated its own on its own machine.
+                                       :fault-model "byzantine-capable (one key per host)"
+                                       :height (r/height s)
+                                       :committed-height (r/committed-height s)
+                                       :pending (count (:pending s))
+                                       :view (:view (:pm s))
+                                       :blocks-known (count (:by-hash s))
+                                       :equivocations (count (:equivocations s))
+                                       ;; Enough to tell WHICH step of a round
+                                       ;; is missing. Without these a stall is
+                                       ;; just "height did not move", which is
+                                       ;; the same picture for four different
+                                       ;; causes.
+                                       :vote-groups (count (:votes s))
+                                       :new-view-groups (count (:new-views s))
+                                       :qcs (count (:qcs s))
+                                       :leader-of-view (nth witnesses
+                                                            (mod (:view (:pm s)) (count witnesses)))
+                                       :tip-height (:inga.block/height (r/tip s))
+                                       :peers-out (when-let [n @out-node] (count ((:live n))))
+                                       :peers-in (srv/peer-count registry)
+                                       :records (store/count-records data-dir)
+                                       :counts @counts}))
+
+                          (= p "/committed")
+                          (let [ref (.get (.-searchParams url) "ref")]
+                            (json-res res 200
+                                      (cond-> {:ok true :records (store/count-records data-dir)
+                                               :source "filesystem"}
+                                        ref (assoc :head (store/head-of data-dir ref)))))
+
+                          (and (= p "/submit") (= "POST" (.-method req)))
+                          (let [chunks (atom "")]
+                            (.on req "data" (fn [c] (swap! chunks str c)))
+                            (.on req "end"
+                                 (fn []
+                                   (let [rec (try (aget (js/JSON.parse @chunks) "record")
+                                                  (catch :default _ nil))
+                                         m (when rec (js->clj rec))]
+                                     (if-not (and (map? m) (get m "ref") (get m "cid"))
+                                       (json-res res 400 {:ok false :error "record required"})
+                                       (do (swap! state r/submit (js/JSON.stringify (clj->js m)))
+                                           (store/write-snapshot! data-dir (r/snapshot @state))
+                                           (json-res res 200 {:ok true :submitted true})))))))
+
+                          :else (json-res res 404 {:ok false :error "not found"})))))
+            wss (ws/WebSocketServer. #js {:server server})
+            n (atom 0)]
+
+        (.on wss "connection"
+             (fn [sock]
+               (let [peer (str "in-" (swap! n inc))
+                     handle (srv/attach! registry peer sock
+                                         {:add-listener (fn [s ev f] (.on s ev f))
+                                          :on-message (fn [_ m] (feed! m))})]
+                 (swap! registry update peer merge handle))))
+        (.listen server port)
+
+        (reset! out-node
+                (nws/make-node {:peers (vec (keys peers))
+                                :url-of (fn [p] (get peers (wire/wire-id p)))
+                                :on-message (fn [_ m] (feed! m))}))
+        ((:tick! @out-node))
+
+        (let [iv (js/setInterval tick! tick-ms)]
+          (js/console.log (str "inga-node " witness " listening on :" port
+                               " peers=" (str/join "," (keys peers))
+                               " tick=" tick-ms "ms data=" data-dir))
+          {:state state
+           :stop! (fn []
+                    (js/clearInterval iv)
+                    (when-let [nd @out-node] ((:close-all! nd)))
+                    (.close wss)
+                    (.close server))})))))

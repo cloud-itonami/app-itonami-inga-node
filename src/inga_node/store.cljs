@@ -1,0 +1,140 @@
+(ns inga-node.store
+  "What survives a restart: this witness's own state, and the log everyone
+  agreed about.
+
+  ## This is the half a Durable Object was being used for
+
+  The Cloudflare deployment got three things from a DO — a single writer, an
+  address, and a place to keep a bounded snapshot. A long-lived process is
+  the first two by construction. This file is the third, and it is a
+  filesystem, which is the point: **delete this directory and the witness
+  rejoins from its peers.** `inga.sync` is how a replica behind the others
+  catches up, and a witness with no snapshot is simply the most behind.
+
+  ## Two different durabilities, deliberately
+
+  `snapshot` is PRIVATE working state, bounded by `inga.replica/snapshot`
+  itself (`resume-tail` blocks, one committed block). Losing it costs this
+  witness its head start, nothing more.
+
+  `committed` is the SHARED log — one file per `(ref, seq)`, which is the
+  identity the ref plane arbitrates, so the same record committed by four
+  leaders is one file. First write wins, because when two different records
+  contend for one sequence the log's ORDER decided it and a later write would
+  contradict the thing that decided.
+
+  Neither is a consensus primitive. Both are projections of a decision the
+  quorum already made, which is why a filesystem is an honest place for them
+  and a vendor's conditional write would not have been (ADR-2608039000)."
+  (:require [clojure.string :as str]
+            [clojure.edn :as edn]
+            ["node:fs" :as fs]
+            ["node:path" :as path]))
+
+(defn- ensure-dir! [d]
+  (when-not (fs/existsSync d) (fs/mkdirSync d #js {:recursive true})))
+
+(defn snapshot-path [data-dir] (path/join data-dir "snapshot.edn"))
+
+(defn write-snapshot!
+  "Write via a temp file and rename.
+
+  A snapshot written in place is a snapshot that can be half a file when the
+  process dies mid-write, and a half-read snapshot is refused by
+  `inga.replica/resume` — which turns a crash into a witness that will not
+  start. `rename` within one filesystem is atomic, so the file a reader sees
+  is always a whole one."
+  [data-dir snap]
+  (ensure-dir! data-dir)
+  (let [f (snapshot-path data-dir)
+        tmp (str f ".tmp")]
+    (fs/writeFileSync tmp (pr-str snap) "utf8")
+    (fs/renameSync tmp f)))
+
+(defn read-snapshot
+  "The stored snapshot, or nil.
+
+  Unreadable is treated as absent, and that is a decision rather than
+  laziness: a stored value this version cannot parse must not brick the
+  witness forever, because the failure is in the LOAD and every retry hits it
+  again. Starting cold costs this witness its history — the others have it —
+  while refusing to start costs the network a witness with no way back."
+  [data-dir]
+  (let [f (snapshot-path data-dir)]
+    (when (fs/existsSync f)
+      (try (edn/read-string (fs/readFileSync f "utf8"))
+           (catch :default _
+             (js/console.warn "inga-node: unreadable snapshot, starting cold")
+             (try (fs/unlinkSync f) (catch :default _ nil))
+             nil)))))
+
+;; ── the shared committed log ────────────────────────────────────────────────
+
+(defn- pad
+  "Zero-padded to 12 digits so directory order IS sequence order. A bare 10
+  sorts before 9 and the contiguous walk below would stop at a gap that is
+  not one."
+  [n]
+  (let [s (str n)]
+    (str (str/join "" (repeat (max 0 (- 12 (count s))) "0")) s)))
+
+(defn decode-proposal
+  "A proposal string back into a head record, or nil.
+
+  Total: a proposal this node cannot read is skipped rather than thrown from.
+  The log is shared and another consumer may put its own proposals in it —
+  engi's are transfer CIDs — and a ref plane that dies on someone else's
+  entry is a ref plane one other tenant can stop."
+  [s]
+  (try
+    (let [m (js->clj (js/JSON.parse s))]
+      (when (and (map? m) (get m "ref") (get m "seq") (get m "cid")) m))
+    (catch :default _ nil)))
+
+(defn- record-path [data-dir rec]
+  (path/join data-dir "committed"
+             (js/encodeURIComponent (get rec "ref"))
+             (str (pad (get rec "seq")) ".json")))
+
+(defn sink-blocks!
+  "Write every head record in `blocks` that is not already logged.
+  Returns how many files were created."
+  [data-dir blocks]
+  (reduce
+   (fn [n rec]
+     (let [f (record-path data-dir rec)]
+       (if (fs/existsSync f)
+         n
+         (do (ensure-dir! (path/dirname f))
+             (fs/writeFileSync f (js/JSON.stringify (clj->js rec)) "utf8")
+             (inc n)))))
+   0
+   (->> blocks (mapcat :inga.block/proposals) (keep decode-proposal))))
+
+(defn count-records [data-dir]
+  (let [root (path/join data-dir "committed")]
+    (if-not (fs/existsSync root)
+      0
+      (reduce (fn [n d]
+                (+ n (count (fs/readdirSync (path/join root d)))))
+              0 (fs/readdirSync root)))))
+
+(defn head-of
+  "The head record for `ref`: the highest sequence reachable CONTIGUOUSLY
+  from 0, which is the rule `inga.ref/head-of` applies to the in-memory
+  projection. A gap means some earlier sequence was never committed, and a
+  head past a gap would claim a history the log does not have."
+  [data-dir ref]
+  (let [d (path/join data-dir "committed" (js/encodeURIComponent ref))]
+    (when (fs/existsSync d)
+      (let [seqs (->> (fs/readdirSync d)
+                      (keep (fn [f]
+                              (let [n (js/parseInt (str/replace f #"\.json$" "") 10)]
+                                (when-not (js/isNaN n) n))))
+                      sort vec)
+            top (reduce (fn [expected n] (if (= n expected) (inc expected) (reduced expected)))
+                        0 seqs)]
+        (when (pos? top)
+          (try (js->clj (js/JSON.parse
+                         (fs/readFileSync (path/join d (str (pad (dec top)) ".json")) "utf8")))
+               (catch :default _ nil)))))))

@@ -1,0 +1,11 @@
+{:paths ["src"]
+ :version "0.1.0"
+ ;; inga — the decisions this layer executes. Nothing else: a mechanism layer
+ ;; that grows a second dependency is usually growing a second opinion.
+ :deps {io.github.kotoba-lang/inga
+        {:git/url "https://github.com/kotoba-lang/inga.git"
+         :git/sha "6af2c9fc2b3f197ee0db895bf6ec46cd764c7d3a"}}
+ :aliases
+ {:lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "script"
+                     "--fail-level" "error"]}}}
