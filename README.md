@@ -66,40 +66,38 @@ SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljs
 N=4 nbb --classpath "src:../inga/src" script/devnet.cljs
 ```
 
-**Restart is proven by the unit suite, not by the devnet.** `devnet`'s
-restart leg runs only after its kill leg, and the kill leg fails on the `inga`
-defect below — so the one property a process must have to replace a Durable
-Object, *it comes back*, went unchecked until `node-test` checked it directly:
-submit, stop, start again on the same directory, and the queued work is still
-there. Disabling `read-snapshot` turns that test red, which is how it is known
-to be checking something.
-
-**`SKIP_KILL=1` passes.** Seven separate OS processes, real sockets, real
-Ed25519, each with its own key and its own disk, agree on a chain and commit
-submitted records to a durable log. That is the whole DO-free claim and it
-holds.
-
-**The default run FAILS, on purpose, and it is not this repo's bug.** Kill one
-witness of seven — quorum is five, six remain, there is a spare — and the
-chain stops for good:
+**The default run passes** (measured 2026-08-11, against `inga` at
+`f75d3db`). Seven separate OS processes, real sockets, real Ed25519, each with
+its own key and its own disk: they agree on a chain, commit submitted records
+to a durable log, **keep committing when one of them is killed**, and take the
+killed one back when it restarts from its own directory.
 
 ```
-before the kill   h=28 ch=26 view=30 nv=2  qcs=28   (all seven agree)
-after             h=29 ch=27 view=38 nv=9  qcs=29   (six agree, height frozen)
+ok   - 7 processes committed a submitted record
+ok   - 6 of 7 kept committing with w3 dead
+ok   - w3 restarted, resumed from its own disk and caught up
+     heads for devnet/a [cid-a cid-a cid-a cid-a cid-a cid-a cid-a]
 ```
 
-Views stay synchronised, leadership rotates onto witnesses that are alive, and
-`new-view` groups pile up — so the timeout path works and **the step from a
-new-view quorum to a proposal does not**. It never recovers.
+That last line is the assertion that matters and the one that is stable: two
+replicas that both decided a `(ref, seq)` decided the same cid. Committed
+HEIGHTS are not asserted — seven processes exchanging real messages are never
+at one height at an instant, and a threshold on a moving quantity turns
+ordinary in-flight work into a failure.
 
-`inga` has 358 tests and a socket harness that survives a Byzantine validator
-for a hundred blocks, and none of them can see this: its `evict!` rebuilds a
-replica *in place* and leaves the peer connected, so **state loss is tested
-and departure is not**. This harness is the first thing to remove a witness.
+**This used to fail, and for most of this repo's life it did.** Killing one
+witness of seven — quorum five, six remaining — stopped the chain for good,
+because leadership was keyed by height and a departed leader held its turn
+forever. `inga` now carries the round in the block and lets a proposer claim a
+skipped one when it holds the evidence that the intervening leaders produced
+nothing (superproject ADR-2608680000). `SKIP_KILL=1` still exists and still
+skips the kill legs, and says so rather than reporting them as passed.
 
-Until that is fixed, this repo is a reproduction, not a deployment. Standing
-one up would replace a plane that depends on a vendor with a plane that stops
-when a machine reboots.
+**Restart is also proven by the unit suite, not only here.** `devnet`'s
+restart leg runs after its kill leg, so while the kill leg failed the restart
+leg proved nothing; `node-test` checks it directly — submit, stop, start again
+on the same directory, and the queued work is still there. Disabling
+`read-snapshot` turns that test red.
 
 ## Layout
 
