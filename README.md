@@ -66,6 +66,14 @@ SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljs
 N=4 nbb --classpath "src:../inga/src" script/devnet.cljs
 ```
 
+**Restart is proven by the unit suite, not by the devnet.** `devnet`'s
+restart leg runs only after its kill leg, and the kill leg fails on the `inga`
+defect below — so the one property a process must have to replace a Durable
+Object, *it comes back*, went unchecked until `node-test` checked it directly:
+submit, stop, start again on the same directory, and the queued work is still
+there. Disabling `read-snapshot` turns that test red, which is how it is known
+to be checking something.
+
 **`SKIP_KILL=1` passes.** Seven separate OS processes, real sockets, real
 Ed25519, each with its own key and its own disk, agree on a chain and commit
 submitted records to a durable log. That is the whole DO-free claim and it
