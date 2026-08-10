@@ -121,6 +121,36 @@ strings. Peers are addressed by tailnet address: **bare hostnames do not
 resolve on the nodes themselves** (`ping benjamin` → Unknown host, measured),
 only `tailscale ping` does.
 
+## It runs on the fleet (2026-08-11)
+
+Four witnesses on four murakumo nodes — judah, benjamin, simeon, joseph —
+each with its own Ed25519 key on its own disk, talking over tailnet:
+
+```
+judah     h 46 ch 44 out 3 in 3 fault byzantine-capable (one key per host)
+benjamin  h 46 ch 44 out 3 in 3
+joseph    h 46 ch 44 out 3 in 3
+```
+
+and a submitted record reaching every durable log:
+
+```
+judah     head {ref fleet/first, seq 0, cid bafyfleet1}
+benjamin  head {ref fleet/first, seq 0, cid bafyfleet1}
+joseph    head {ref fleet/first, seq 0, cid bafyfleet1}
+```
+
+This is the deployment ADR-2608670000 chose over Durable Objects, actually
+standing up. The fault-model string is not aspirational here: those four keys
+were generated on four machines and none of them has ever been transmitted.
+
+**Node version was a variable and is not any more.** The one node on Node 22
+died at startup with an undici stack while the three on Node 26 formed a
+chain: a failed outbound `new WebSocket(...)` escaped `onerror` there. The
+client now uses the `ws` package the server side already used, so the runtime
+version stops mattering. (The immediate crash was startup ordering — dialling
+peers that were not listening yet — and it recovers once they are.)
+
 ## Layout
 
 ```

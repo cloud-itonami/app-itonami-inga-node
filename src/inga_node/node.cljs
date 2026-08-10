@@ -211,7 +211,19 @@
         (.listen server port)
 
         (reset! out-node
-                (nws/make-node {:peers (vec (keys peers))
+                (nws/make-node {;; The `ws` package, not the platform global.
+                                ;;
+                                ;; Node 26 and Node 22 disagree about what a
+                                ;; failed `new WebSocket(...)` does: on 22 the
+                                ;; error escaped `onerror` and killed the
+                                ;; process. Measured on the fleet — three
+                                ;; nodes on 26 formed a chain while the one on
+                                ;; 22 died at startup with an undici stack.
+                                ;; The server side of this file already uses
+                                ;; `ws`; using it on the client side too makes
+                                ;; the runtime version stop being a variable.
+                                :ctor (or (.-WebSocket ws) ws)
+                                :peers (vec (keys peers))
                                 :url-of (fn [p] (get peers (wire/wire-id p)))
                                 :on-message (fn [_ m] (feed! m))}))
         ((:tick! @out-node))
