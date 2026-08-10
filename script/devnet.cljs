@@ -149,6 +149,8 @@
                    (println (str "     " w " unreachable"))))
                nil))))
 
+(def ^:private skip-kill? (= "1" (some-> js/process .-env .-SKIP_KILL)))
+
 (defn -main []
   (fs/mkdirSync root #js {:recursive true})
   (println "devnet root:" root)
@@ -170,7 +172,8 @@
                  ;; wrong before anyone checked that a second record commits
                  ;; on a healthy network. `SKIP_KILL=1` is that control.
                  (if (= "1" (some-> js/process .-env .-SKIP_KILL))
-                   (println "     (SKIP_KILL=1 — leaving all witnesses alive)")
+                   (println "     (SKIP_KILL=1 — nothing is killed, so the two legs"
+                            "below prove NOTHING about departure or restart)")
                    (do (.kill (get @procs "w3"))
                        (swap! procs dissoc "w3")))
                  (sleep 3000)))
@@ -179,8 +182,11 @@
         (.then (fn [_] (await-until #(records-of "w2") #(and % (> % 1)) 60 500)))
         (.then (fn [n]
                  (if (and n (> n 1))
-                   (do (println (str "ok   - " (dec (count witnesses)) " of " (count witnesses)
-                                     " kept committing with w3 dead (w2 sees " n ")"))
+                   (do (println (str "ok   - " (if skip-kill?
+                                                  "the network kept committing (w3 was NOT killed)"
+                                                  (str (dec (count witnesses)) " of " (count witnesses)
+                                                       " kept committing with w3 dead"))
+                                     " (w2 sees " n ")"))
                        (js/Promise.resolve nil))
                    (-> (dump! (keys @procs) "stalled with one witness down")
                        (.then (fn [_]
@@ -195,7 +201,10 @@
         (.then (fn [n]
                  (when-not (and n (> n 1))
                    (fail! "the restarted witness never caught up — it did not resume"))
-                 (println "ok   - w3 restarted, resumed from its own disk and caught up (sees" n ")")
+                 (println (if skip-kill?
+                            "skip - w3 was never killed, so this leg proves nothing (sees "
+                            "ok   - w3 restarted, resumed from its own disk and caught up (sees ")
+                          n ")")
                  (http "w3" "/health")))
         (.then (fn [h]
                  (println "     w3 height" (aget h "height")
@@ -203,12 +212,41 @@
                           "peers-out" (aget h "peers-out"))
                  (js/Promise.all (into-array (map #(http % "/health") witnesses)))))
         (.then (fn [hs]
-                 (let [heights (mapv #(aget % "committed-height") (array-seq hs))
-                       spread (- (apply max heights) (apply min heights))]
-                   (println "     committed heights" heights)
-                   (when (> spread 2)
-                     (fail! (str "replicas drifted apart: " heights)))
-                   (println "\nDEVNET: pass — a witness died, came back from its own disk, and rejoined")
+                 (println "     committed heights"
+                          (mapv #(aget % "committed-height") (array-seq hs)))
+                 ;; NOT an assertion on the spread. Seven processes exchanging
+                 ;; real messages are never at one height at an arbitrary
+                 ;; instant, and the spread does not close while the chain is
+                 ;; live — measured [67 65 65 64 65 66 65], then, four seconds
+                 ;; later and all higher, [38 38 40 41 38 40 39]. Every replica
+                 ;; was advancing. A threshold on a moving quantity turns
+                 ;; ordinary in-flight work into a failure, which is the same
+                 ;; mistake as asserting equal heights in a HotStuff network.
+                 ;;
+                 ;; The property that must hold regardless of lag is SAFETY:
+                 ;; wherever two replicas have both decided a (ref, seq), they
+                 ;; decided the SAME cid. Liveness is already covered above by
+                 ;; records appearing at all.
+                 (js/Promise.all
+                  (into-array
+                   (map (fn [w]
+                          (-> (js/fetch (str "http://127.0.0.1:" (port-of w)
+                                             "/committed?ref=" (js/encodeURIComponent "devnet/a")))
+                              (.then #(.json %))
+                              (.then (fn [j] [w (some-> (aget j "head") (aget "cid"))]))
+                              (.catch (fn [_] [w nil]))))
+                        witnesses)))))
+        (.then (fn [pairs]
+                 (let [seen (->> (array-seq pairs) (map second) (remove nil?) vec)]
+                   (println "     heads for devnet/a" seen)
+                   (when (empty? seen)
+                     (fail! "no replica resolved a head — nothing was decided"))
+                   (when (> (count (set seen)) 1)
+                     (fail! (str "replicas decided DIFFERENT cids for one sequence: " seen)))
+                   (println (str "\nDEVNET: pass — " (count seen) " replicas decided the same"
+                                 " (ref, seq) and " (if skip-kill?
+                                                      "the kill legs were skipped"
+                                                      "a witness died, came back and rejoined")))
                    (kill-all!)
                    (js/process.exit 0))))
         (.catch (fn [e]
