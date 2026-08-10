@@ -57,7 +57,13 @@
        "const sk=c.createPrivateKey({key:der,format:\"der\",type:\"pkcs8\"});"
        "const pub=c.createPublicKey(sk).export({format:\"der\",type:\"spki\"}).subarray(12).toString(\"hex\");"
        "console.log(pub);"
-       "' \"$D/seed\"\n"))
+       "' \"$D/seed\"\n"
+       ;; ...and its own tailnet address, while we are already here. The
+       ;; generated peer URLs used bare hostnames in the first version — the
+       ;; very thing the comment above them warned does not resolve ON the
+       ;; nodes. Asking the node itself is both correct and cheaper than a
+       ;; lookup table that goes stale.
+       "(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null) | head -1\n"))
 
 (defn- witness-of [hosts host] (str "w" (inc (.indexOf (to-array hosts) host))))
 
@@ -65,7 +71,11 @@
   (mapv (fn [h]
           (let [w (witness-of hosts h)
                 r (ssh h (mint-script w))]
-            (assoc r :witness w :pubkey (when (:ok r) (last (str/split-lines (:out r)))))))
+            (let [lines (when (:ok r) (vec (remove str/blank? (str/split-lines (:out r)))))]
+              ;; pubkey then tailnet address, in the order the script prints them
+              (assoc r :witness w
+                     :pubkey (when (seq lines) (nth lines (- (count lines) 2) nil))
+                     :addr (when (seq lines) (peek lines))))))
         hosts))
 
 (defn -main [& args]
@@ -77,7 +87,7 @@
     (let [rs (collect hosts)]
       (doseq [{:keys [host witness ok pubkey err]} rs]
         (if ok
-          (println (str witness " " host " " pubkey))
+          (println (str witness " " host " " pubkey " @" (:addr (first (filter #(= host (:host %)) rs))) ))
           (println (str witness " " host " UNREACHABLE " (subs err 0 (min 120 (count err)))))))
       (when (= "config" cmd)
         (let [good (filter :ok rs)]
@@ -91,7 +101,7 @@
           (doseq [{:keys [witness host]} good]
             (println (str witness " (" host "): "
                           (str/join "," (for [o good :when (not= (:witness o) witness)]
-                                          (str (:witness o) "=ws://" (:host o) ":"
+                                          (str (:witness o) "=ws://" (or (:addr o) (:host o)) ":"
                                                (+ port-base (.indexOf (to-array hosts) (:host o)))))))))))
       (when (some (complement :ok) rs) (js/process.exit 1)))))
 
