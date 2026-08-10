@@ -1,0 +1,48 @@
+;; A launchd job per witness, printed for a host.
+;;
+;;   nbb script/plist.cljs w1 > com.gftd.inga-node.plist
+;;
+;; `nohup` was how the fleet was first stood up and it is not a deployment:
+;; the process dies with the login session and does not come back after a
+;; reboot. A consensus witness that disappears when a machine restarts is a
+;; witness the network has to route around every time someone updates macOS.
+;;
+;; The environment lives in `run.sh` on the node rather than in the plist, so
+;; a config change does not mean regenerating and reloading a launchd job —
+;; and so that the plist carries no keys. It carries none: the seed is read
+;; from disk by the process itself.
+;;
+;; ⚠ XML comments cannot contain a double hyphen. A broken plist does not
+;; error — launchd simply does not load it — which is the hardest failure to
+;; notice, and this workspace has hit it before (com.gftd.observatory-run).
+(ns plist
+  (:require [clojure.string :as str]))
+
+(defn -main [& [witness]]
+  (when (str/blank? (or witness ""))
+    (println "usage: nbb script/plist.cljs <witness>")
+    (js/process.exit 2))
+  (println
+   (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\""
+        " \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\">\n<dict>\n"
+        "  <key>Label</key><string>com.gftd.inga-node." witness "</string>\n"
+        "  <key>ProgramArguments</key>\n  <array>\n"
+        "    <string>/bin/bash</string>\n"
+        "    <string>" "RUNSH" "</string>\n"
+        "  </array>\n"
+        ;; Restart it when it exits, whatever the reason. A witness that
+        ;; crashed once and stayed down is indistinguishable, from the
+        ;; network's side, from one that was decommissioned.
+        "  <key>KeepAlive</key><true/>\n"
+        "  <key>RunAtLoad</key><true/>\n"
+        ;; Not zero. A process that fails instantly and is restarted instantly
+        ;; is a busy loop that takes the machine with it.
+        "  <key>ThrottleInterval</key><integer>10</integer>\n"
+        "  <key>StandardOutPath</key><string>LOGPATH</string>\n"
+        "  <key>StandardErrorPath</key><string>LOGPATH</string>\n"
+        "  <key>WorkingDirectory</key><string>APPDIR</string>\n"
+        "</dict>\n</plist>")))
+
+(apply -main (drop 3 (array-seq js/process.argv)))
