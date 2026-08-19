@@ -28,6 +28,7 @@
   and a vendor's conditional write would not have been (ADR-2608039000)."
   (:require [clojure.string :as str]
             [clojure.edn :as edn]
+            [inga-node.proof :as proof]
             ["node:fs" :as fs]
             ["node:path" :as path]))
 
@@ -154,25 +155,20 @@
                   ;; leaves a record without a proof rather than a proof
                   ;; without a record. A reader treats the first as
                   ;; unverifiable and the second as a phantom head.
-                  (fs/writeFileSync pf (pr-str {:block block :qc qc}) "utf8")))
+                  ;; `*print-namespace-maps*` pinned off, the same reason
+                  ;; `kekkai.envelope` pins it: a map whose keys share a
+                  ;; namespace prints as `#:inga.qc{…}` by default in some
+                  ;; contexts and not others, so a file written by hand and a
+                  ;; file written by this process would differ. `clojure.edn`
+                  ;; reads both, so this is stability rather than correctness
+                  ;; — and a proof that reads back differently depending on
+                  ;; who wrote it is a proof nobody can diff.
+                  (fs/writeFileSync pf (proof/encode {:block block :qc qc}) "utf8")))
               (inc n)))))
     0
     (for [b blocks
           rec (keep decode-proposal (:inga.block/proposals b))]
       [b rec]))))
-
-(defn decode-proof
-  "A `{:block :qc}` proof from its EDN text, or nil.
-
-  Shared by the file reader below and by any HTTP client of `/committed`,
-  because a proof decoded two ways is a proof one of them gets wrong — and
-  reading it is exactly where the JSON version went wrong silently."
-  [text]
-  (try
-    (let [m (edn/read-string (str text))]
-      (when (and (map? m) (map? (:block m)) (map? (:qc m)))
-        m))
-    (catch :default _ nil)))
 
 (defn proof-text
   "The proof for `ref`/`seq` as the EDN text it is stored as, or nil.
@@ -190,7 +186,7 @@
 (defn proof-of
   "`{:block :qc}` for the record at `ref`/`seq`, or nil."
   [data-dir ref seq']
-  (some-> (proof-text data-dir ref seq') decode-proof))
+  (some-> (proof-text data-dir ref seq') proof/decode))
 
 (defn count-records [data-dir]
   (let [root (path/join data-dir "committed")]

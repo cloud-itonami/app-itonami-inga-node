@@ -6,7 +6,8 @@
   (:require [clojure.test :as t]
             [inga-node.seams-test]
             [inga-node.store-test]
-            [inga-node.node-test]))
+            [inga-node.node-test]
+            [inga-node.ref-test]))
 
 ;; cljs.test already prints the summary; this only makes a failure EXIT
 ;; non-zero, which is what a runner is for. Printing it twice would be a
@@ -14,4 +15,5 @@
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (when (pos? (+ (:fail m) (:error m))) (js/process.exit 1)))
 
-(t/run-tests 'inga-node.seams-test 'inga-node.store-test 'inga-node.node-test)
+(t/run-tests 'inga-node.seams-test 'inga-node.store-test 'inga-node.node-test
+             'inga-node.ref-test)
