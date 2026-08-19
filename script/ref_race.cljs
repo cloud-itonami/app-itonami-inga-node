@@ -20,8 +20,12 @@
 ;; the point of the exercise is exactly that distinction.
 (ns ref-race
   (:require [clojure.string :as str]
+            [inga.commitment :as cm]
+            [inga.consensus :as c]
             [inga.ref :as ref]
             [inga-node.identity :as ident]
+            [inga-node.seams :as seams]
+            [inga-node.store :as store]
             ["node:child_process" :as cp]
             ["node:fs" :as fs]
             ["node:os" :as os]
@@ -88,6 +92,16 @@
 (defn- head-from [w ref-name]
   (-> (http w (str "/committed?ref=" (js/encodeURIComponent ref-name)))
       (.then (fn [j] (when j (js->clj (aget j "head")))))))
+
+(defn- committed-from
+  "`{:head :proof}` as a witness serves it — the proof travels with the head,
+  so a reader never has to decide whether two answers describe one moment."
+  [w ref-name]
+  (-> (http w (str "/committed?ref=" (js/encodeURIComponent ref-name)))
+      (.then (fn [j]
+               (when j
+                 {:head (js->clj (aget j "head"))
+                  :proof (store/decode-proof (aget j "proof"))})))))
 
 (defn- committed-records
   "Every committed head record for `ref-name` on `w`'s own disk, in sequence
@@ -219,6 +233,38 @@
              (check (= 1 (count cids))
                     "every witness reports the same winning CID"
                     {:cids cids}))
+           ;; And now the part that does not take the witness's word for it.
+           (committed-from reader ref-name)))
+        (.then
+         (fn [{:keys [head proof]}]
+           (let [ctx {:chain-id "inga-ref-race-1"
+                      :hash-fn seams/hash-fn
+                      :quorum (c/quorum-size (count witnesses))
+                      :verify-fn (seams/verify-fn pubkeys)
+                      :admitted? (set witnesses)
+                      :decode-proposal #(js->clj (js/JSON.parse %))}]
+             (check (some? proof)
+                    "the head arrives with a proof that it was committed"
+                    {:has-block (some? (:block proof)) :has-qc (some? (:qc proof))})
+             (check (some? (cm/verify-head head ref-name proof ctx))
+                    "…and it verifies OFFLINE — the record is in the block, and the block carries a quorum")
+             ;; A verifier that accepts anything is the same shape as one that
+             ;; works. Three ways of being wrong, each refused for its own
+             ;; reason.
+             (check (nil? (cm/verify-head head ref-name
+                                          (assoc-in proof [:qc :inga.qc/block-hash] "not-this-block")
+                                          ctx))
+                    "…a certificate naming another block does not prove this one")
+             (check (nil? (cm/verify-head head ref-name
+                                          (update-in proof [:qc :inga.qc/sigs]
+                                                     (fn [m] (into {} (map (fn [[k _]] [k "AAAA"])) m)))
+                                          ctx))
+                    "…forged signatures do not verify")
+             (check (nil? (cm/verify-head head "some/other/ref" proof ctx))
+                    "…and a real proof answers the ref it was made for, not the one asked about"))
+           (js/Promise.resolve nil)))
+        (.then
+         (fn [_]
            (kill-all!)
            (println)
            (if (seq @failures)
