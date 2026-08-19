@@ -129,6 +129,21 @@ The loser being *told the winning CID* is the half that makes a loss
 recoverable: a writer that learns only `false` retries against the base it
 already knows is stale.
 
+The head now arrives **with a proof that it was committed**, and the run
+verifies it offline: `inga.commitment/verify-head` recomputes the block hash,
+checks the certificate names that block, checks the certificate against the
+real Ed25519 witness keys, and checks the record is among the block's
+proposals. Three ways of being wrong are refused beside it — a certificate for
+another block, forged signatures, and a real proof answered against a ref it
+was not made for.
+
+**Proofs are stored and served as EDN, not JSON.** `:inga.block/proposals` and
+`:inga.qc/block-hash` are qualified keywords and `:inga.qc/witnesses` is a set;
+`clj->js` writes a keyword by its `name` alone, so the first version of this
+silently produced `:proposals` and `:block-hash` and every proof failed
+`:block-not-certified` with an empty hash. The wire carries one EDN string and
+the client parses it with the same `store/decode-proof` the node uses.
+
 `BOTH_WIN=1` is the control and the run must FAIL under it: the second writer
 moves to seq 1, both records commit legitimately, and `exactly one writer won`
 has to notice. **It did not, at first.** The first version projected the

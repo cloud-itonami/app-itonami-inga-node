@@ -99,7 +99,12 @@
               ;; that is on in two of them.
               (let [s @state
                     fresh (vec (drop before (:committed s)))]
-                (when (seq fresh) (store/sink-blocks! data-dir fresh))
+                (when (seq fresh)
+                  ;; The certificates and the hash come from the SAME state
+                  ;; snapshot the blocks did. Reading them separately would
+                  ;; let a tick land in between and pair a block with a
+                  ;; certificate for a different one.
+                  (store/sink-blocks! data-dir fresh (:qcs s) (:hash-fn s)))
                 (store/write-snapshot! data-dir (r/snapshot s))))
 
             (ship! [outbox]
@@ -177,11 +182,25 @@
                                        :counts @counts}))
 
                           (= p "/committed")
-                          (let [ref (.get (.-searchParams url) "ref")]
+                          (let [ref (.get (.-searchParams url) "ref")
+                                head (when ref (store/head-of data-dir ref))]
                             (json-res res 200
                                       (cond-> {:ok true :records (store/count-records data-dir)
                                                :source "filesystem"}
-                                        ref (assoc :head (store/head-of data-dir ref)))))
+                                        ref (assoc :head head)
+                                        ;; The proof travels WITH the head, so
+                                        ;; a reader never has to ask a second
+                                        ;; time and never has to decide
+                                        ;; whether the two answers describe
+                                        ;; the same moment.
+                                        ;; The EDN text, not a re-encoded
+                                        ;; value: a proof's qualified keywords
+                                        ;; and sets do not survive JSON, which
+                                        ;; is why it is stored as EDN in the
+                                        ;; first place.
+                                        head (assoc :proof
+                                                    (store/proof-text
+                                                     data-dir ref (get head "seq"))))))
 
                           (and (= p "/submit") (= "POST" (.-method req)))
                           (let [chunks (atom "")]

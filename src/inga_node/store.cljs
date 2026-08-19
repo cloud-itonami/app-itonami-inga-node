@@ -106,20 +106,91 @@
              (js/encodeURIComponent (get rec "ref"))
              (str (pad (get rec "seq")) ".json")))
 
+(defn- proof-path [data-dir rec]
+  ;; A directory of its own, not a `<seq>.proof.json` beside the record.
+  ;; `head-of` derives a sequence with `parseInt`, which stops at the first
+  ;; non-digit, so `000000000000.proof` parses as 0 and a proof file would
+  ;; masquerade as the genesis record.
+  ;;
+  ;; **EDN, not JSON.** A proof is the one value here whose exact shape is
+  ;; load-bearing: `:inga.block/proposals` and `:inga.qc/block-hash` are
+  ;; QUALIFIED keywords and `:inga.qc/witnesses` is a SET. `clj->js` writes a
+  ;; keyword by its `name` alone, so a JSON round trip silently returns
+  ;; `:proposals` and `:block-hash` and the certificate then names no block at
+  ;; all. Measured: the first version of this did exactly that, and every
+  ;; proof failed `:block-not-certified` with an empty hash.
+  (path/join data-dir "proofs"
+             (js/encodeURIComponent (get rec "ref"))
+             (str (pad (get rec "seq")) ".edn")))
+
 (defn sink-blocks!
-  "Write every head record in `blocks` that is not already logged.
-  Returns how many files were created."
-  [data-dir blocks]
-  (reduce
-   (fn [n rec]
-     (let [f (record-path data-dir rec)]
-       (if (fs/existsSync f)
-         n
-         (do (ensure-dir! (path/dirname f))
-             (fs/writeFileSync f (js/JSON.stringify (clj->js rec)) "utf8")
-             (inc n)))))
-   0
-   (->> blocks (mapcat :inga.block/proposals) (keep decode-proposal))))
+  "Write every head record in `blocks` that is not already logged, and beside
+  it the proof that it was committed. Returns how many records were created.
+
+  `qcs` is the certificate map keyed by block hash, and `hash-fn` the
+  deployment's own — `inga.commitment` verifies a record by MEMBERSHIP (this
+  record is in this block, this block's hash is the one the certificate
+  names), because inga's witnesses sign a vote payload over a block hash and
+  never the head record itself. Without the block and the certificate, a
+  reader can only take this node's word for the log, which is the one thing
+  `inga.ref` exists not to do.
+
+  Both are optional. A caller with no certificates writes records exactly as
+  before and readers fall back to trusting the host — worse, and still
+  working, rather than a node that refuses to log."
+  ([data-dir blocks] (sink-blocks! data-dir blocks nil nil))
+  ([data-dir blocks qcs hash-fn]
+   (reduce
+    (fn [n [block rec]]
+      (let [f (record-path data-dir rec)]
+        (if (fs/existsSync f)
+          n
+          (do (ensure-dir! (path/dirname f))
+              (fs/writeFileSync f (js/JSON.stringify (clj->js rec)) "utf8")
+              (when-let [qc (and hash-fn qcs (get qcs (hash-fn block)))]
+                (let [pf (proof-path data-dir rec)]
+                  (ensure-dir! (path/dirname pf))
+                  ;; Written AFTER the record, so a crash between the two
+                  ;; leaves a record without a proof rather than a proof
+                  ;; without a record. A reader treats the first as
+                  ;; unverifiable and the second as a phantom head.
+                  (fs/writeFileSync pf (pr-str {:block block :qc qc}) "utf8")))
+              (inc n)))))
+    0
+    (for [b blocks
+          rec (keep decode-proposal (:inga.block/proposals b))]
+      [b rec]))))
+
+(defn decode-proof
+  "A `{:block :qc}` proof from its EDN text, or nil.
+
+  Shared by the file reader below and by any HTTP client of `/committed`,
+  because a proof decoded two ways is a proof one of them gets wrong — and
+  reading it is exactly where the JSON version went wrong silently."
+  [text]
+  (try
+    (let [m (edn/read-string (str text))]
+      (when (and (map? m) (map? (:block m)) (map? (:qc m)))
+        m))
+    (catch :default _ nil)))
+
+(defn proof-text
+  "The proof for `ref`/`seq` as the EDN text it is stored as, or nil.
+
+  Text rather than a parsed value, because the HTTP layer serves JSON and a
+  parsed proof would have to be re-encoded to get there — which is the lossy
+  step this format exists to avoid. One string crosses the wire and the client
+  parses it with the same `decode-proof` this node uses."
+  [data-dir ref seq']
+  (let [f (path/join data-dir "proofs" (js/encodeURIComponent ref)
+                     (str (pad seq') ".edn"))]
+    (when (fs/existsSync f)
+      (try (fs/readFileSync f "utf8") (catch :default _ nil)))))
+
+(defn proof-of
+  "`{:block :qc}` for the record at `ref`/`seq`, or nil."
+  [data-dir ref seq']
+  (some-> (proof-text data-dir ref seq') decode-proof))
 
 (defn count-records [data-dir]
   (let [root (path/join data-dir "committed")]
