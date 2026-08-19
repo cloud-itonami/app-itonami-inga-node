@@ -99,6 +99,45 @@ leg proved nothing; `node-test` checks it directly — submit, stop, start again
 on the same directory, and the queued work is still there. Disabling
 `read-snapshot` turns that test red.
 
+## The three parts assembled (2026-08-20)
+
+`inga_node.ref` is one `kotobase.storage.core/IRefStore`: it reads a head,
+**proves it was committed** with `inga.commitment`, and compare-and-sets by
+submitting and waiting. Until now the `head-of!` seam, the verifier and the
+witness that serves `{block, qc}` were each measured and never put together.
+
+```clojure
+(nref/ref-store
+ {:committed (fn [ref-name] {:head … :proof "<edn>"})   ; GET /committed?ref=
+  :submit!   (fn [record] …)                            ; POST /submit
+  :sleep!    (fn [ms] …)                                ; must BLOCK
+  :context   {…}})                                      ; inga.commitment
+```
+
+**The transport is injected and this namespace is `.cljc`, because
+`-compare-and-set-ref!` is synchronous and a commit is not.** On Node nothing
+can block, so a live deployment of this store is a JVM consumer supplying
+`java.net.http` and a real sleep. That is `inga.ref`'s own reading — its
+docstring says the waiting lives in the host — made concrete rather than
+restated.
+
+The proof's format lives in its own portable `inga_node.proof` — the store is
+`.cljs` because it is a filesystem, and a `.cljc` namespace that requires a
+ClojureScript one is portable in name only. clj-kondo said so before a
+consumer did; `clojure -M -e \"(require 'inga-node.ref)\"` on a JVM is the
+check that it is not just quiet.
+
+`ref_test` drives it over the **real bytes**: `store/sink-blocks!` writes the
+proof, real Ed25519 keys sign the votes, `seams/hash-fn` hashes the block, and
+only the socket is replaced by a direct read of the files the HTTP surface
+serves. The load-bearing assertion is that editing a proof on disk makes the
+head **absent** — the store verifies rather than reads — and restoring it
+brings the head back. Breaking `verified-head` to return the head unverified
+fails that assertion and the wrong-ref one, and nothing else.
+
+What is still untested here is the socket and the waiting, and both are the
+caller's by construction.
+
 ## Two writers, one ref, one sequence (2026-08-19)
 
 `script/ref_race.cljs` asks the network the question `inga`'s own `ref_test`

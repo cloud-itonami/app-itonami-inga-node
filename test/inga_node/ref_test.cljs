@@ -1,0 +1,145 @@
+(ns inga-node.ref-test
+  "The three parts assembled: the `head-of!` seam, the commitment verifier,
+  and a witness's own on-disk log.
+
+  Driven over the REAL bytes — `store/sink-blocks!` writes the proof, real
+  Ed25519 keys sign the votes, `seams/hash-fn` hashes the block — with the
+  socket replaced by a direct read of the same files the HTTP surface serves.
+  What that leaves untested is the socket and the waiting, and those are the
+  caller's by construction: `-compare-and-set-ref!` is synchronous and Node
+  cannot block."
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is testing]]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            [inga.attest :as att]
+            [inga.consensus :as c]
+            [inga-node.identity :as ident]
+            [inga-node.ref :as nref]
+            [inga-node.seams :as seams]
+            [inga-node.store :as store]
+            [kotobase.storage.core :as storage]))
+
+(def ^:const chain "inga-node-ref-test")
+(def witnesses ["w1" "w2" "w3" "w4"])
+
+(defn- tmp [] (fs/mkdtempSync (path/join (os/tmpdir) "inga-node-ref-")))
+
+(defn- keys-for [root]
+  (into {} (map (fn [w]
+                  (let [d (path/join root "keys" w)]
+                    (fs/mkdirSync d #js {:recursive true})
+                    [w (ident/ensure-seed! d)]))
+                witnesses)))
+
+(defn- pubkeys [seeds]
+  (into {} (map (fn [[w s]] [w (ident/public-hex s)])) seeds))
+
+(defn- commit!
+  "Put `record` on `data-dir`'s log the way a witness does: in a block, under
+  a certificate its own keys signed."
+  [data-dir seeds record height]
+  (let [block {:inga.block/height height
+               :inga.block/proposals [(js/JSON.stringify (clj->js record))]}
+        bh (seams/hash-fn block)
+        votes (mapv (fn [w]
+                      (att/sign-vote (c/make-vote w bh height) chain 1
+                                     (seams/sign-fn (get seeds w))))
+                    (take 3 witnesses))
+        qc (att/certify (c/qc votes (count witnesses) 1) votes)]
+    (store/sink-blocks! data-dir [block] {bh qc} seams/hash-fn)))
+
+(defn- store-for [data-dir seeds]
+  (let [committed (atom [])]
+    {:committed committed
+     :refs (nref/ref-store
+            {:committed (fn [ref-name]
+                          (when-let [head (store/head-of data-dir ref-name)]
+                            {:head head
+                             :proof (store/proof-text data-dir ref-name
+                                                      (get head "seq"))}))
+             :submit! (fn [record]
+                        ;; The fake network: a witness that commits at once.
+                        ;; The bytes, the certificate and the verification are
+                        ;; real; only the wait is not.
+                        (swap! committed conj record)
+                        (commit! data-dir seeds record (inc (get record "seq"))))
+             :sleep! (fn [_] nil)
+             :tries 1
+             :context {:chain-id chain
+                       :hash-fn seams/hash-fn
+                       :quorum (c/quorum-size (count witnesses))
+                       :verify-fn (seams/verify-fn (pubkeys seeds))
+                       :admitted? (set witnesses)
+                       :decode-proposal #(js->clj (js/JSON.parse %))}})}))
+
+(deftest a-head-is-read-only-when-its-commitment-verifies
+  (let [root (tmp) seeds (keys-for root) data (path/join root "node")
+        {:keys [refs]} (store-for data seeds)]
+
+    (testing "an empty ref reads as absent"
+      (is (nil? (storage/-read-ref refs "main"))))
+
+    (testing "a compare-and-set publishes, and the head that comes back has
+              been proved committed rather than merely served"
+      (let [r (storage/-compare-and-set-ref! refs "main" nil "cid-1")]
+        (is (:published? r))
+        (is (= {:cid "cid-1" :version 0} (storage/-read-ref refs "main")))))
+
+    (testing "a second writer from the same base loses, and is told the head
+              that actually won"
+      (let [loser (storage/-compare-and-set-ref! refs "main" nil "cid-other")]
+        (is (false? (:published? loser)))
+        (is (= "cid-1" (:current loser)))))
+
+    (testing "the store VERIFIES rather than reads: edit the proof on disk and
+              the head becomes absent, which is the whole reason this seam
+              exists instead of trusting the host"
+      (let [f (path/join data "proofs" (js/encodeURIComponent "main") "000000000000.edn")
+            good (fs/readFileSync f "utf8")]
+        ;; Edited structurally, not by regex. The first version substituted on
+        ;; the text and matched nothing, because `pr-str` prints a map whose
+        ;; keys share a namespace as `#:inga.qc{:block-hash …}` — so the file
+        ;; was unchanged, the head verified, and the test reported that the
+        ;; store does not verify. The break has to break the thing the
+        ;; assertion names.
+        (fs/writeFileSync
+         f (pr-str (assoc-in (edn/read-string good)
+                             [:qc :inga.qc/block-hash] "not-this-block"))
+         "utf8")
+        (is (nil? (storage/-read-ref refs "main")))
+        (fs/writeFileSync f good "utf8")
+        (is (some? (storage/-read-ref refs "main")) "and restoring it restores the head")))))
+
+(deftest a-proof-for-another-ref-does-not-answer-this-one
+  (let [root (tmp) seeds (keys-for root) data (path/join root "node")
+        {:keys [refs]} (store-for data seeds)]
+    (storage/-compare-and-set-ref! refs "main" nil "cid-main")
+    (storage/-compare-and-set-ref! refs "other" nil "cid-other")
+    (testing "`ref` lives inside the certified record, so `other`'s head and
+              `other`'s proof are a perfectly good proof OF OTHER — served
+              under `main` it must still be refused"
+      (let [refs' (nref/ref-store
+                   {:committed (fn [_]
+                                 (let [h (store/head-of data "other")]
+                                   {:head h
+                                    :proof (store/proof-text data "other" (get h "seq"))}))
+                    :submit! (fn [_] nil)
+                    :sleep! (fn [_] nil)
+                    :context {:chain-id chain
+                              :hash-fn seams/hash-fn
+                              :quorum (c/quorum-size (count witnesses))
+                              :verify-fn (seams/verify-fn (pubkeys seeds))
+                              :admitted? (set witnesses)
+                              :decode-proposal #(js->clj (js/JSON.parse %))}})]
+        (is (nil? (storage/-read-ref refs' "main")))
+        (is (some? (storage/-read-ref refs' "other")))))))
+
+(deftest every-seam-is-required
+  (is (thrown? js/Error (nref/ref-store {:submit! identity :sleep! identity
+                                         :context {}})))
+  (is (thrown? js/Error (nref/ref-store {:committed identity :sleep! identity
+                                         :context {}})))
+  (is (thrown? js/Error (nref/ref-store {:committed identity :submit! identity
+                                         :sleep! identity}))))

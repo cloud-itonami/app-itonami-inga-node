@@ -25,7 +25,7 @@
             [inga.ref :as ref]
             [inga-node.identity :as ident]
             [inga-node.seams :as seams]
-            [inga-node.store :as store]
+            [inga-node.proof :as proof]
             ["node:child_process" :as cp]
             ["node:fs" :as fs]
             ["node:os" :as os]
@@ -101,7 +101,7 @@
       (.then (fn [j]
                (when j
                  {:head (js->clj (aget j "head"))
-                  :proof (store/decode-proof (aget j "proof"))})))))
+                  :proof (proof/decode (aget j "proof"))})))))
 
 (defn- committed-records
   "Every committed head record for `ref-name` on `w`'s own disk, in sequence
