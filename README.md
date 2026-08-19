@@ -99,6 +99,43 @@ leg proved nothing; `node-test` checks it directly — submit, stop, start again
 on the same directory, and the queued work is still there. Disabling
 `read-snapshot` turns that test red.
 
+## Two writers, one ref, one sequence (2026-08-19)
+
+`script/ref_race.cljs` asks the network the question `inga`'s own `ref_test`
+asks a cooperative oracle in-process: two records for the **same `[ref seq]`**
+with different CIDs, submitted **concurrently to two different witnesses**, and
+the answer read from a **third** that received neither.
+
+```bash
+npm install
+INGA_CP="src:<inga>/src:<kotobase-storage>/src" \
+  nbb --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljs
+```
+
+The decision procedure is not reimplemented — `inga.ref/project` folds the
+committed log first-wins and `inga.ref/outcome` says whether a record won its
+sequence. This script only supplies the network under it. Measured, seven
+witnesses:
+
+```
+committed log:  [[0 "cid-from-bot-b"]]
+bot-b outcome:  {:certified? true}
+bot-c outcome:  {:certified? false, :current "cid-from-bot-b"}
+```
+
+The loser's record is never written at all — `store/sink-blocks!` skips a
+sequence whose file exists, which is where first-wins actually lands on disk.
+The loser being *told the winning CID* is the half that makes a loss
+recoverable: a writer that learns only `false` retries against the base it
+already knows is stale.
+
+`BOTH_WIN=1` is the control and the run must FAIL under it: the second writer
+moves to seq 1, both records commit legitimately, and `exactly one writer won`
+has to notice. **It did not, at first.** The first version projected the
+`/committed?ref=` head alone, and a single head cannot show two winners at
+different sequences — the control passed while both records sat in the log.
+The script now projects the log.
+
 ## Standing witnesses up on a fleet
 
 ```bash
