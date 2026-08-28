@@ -104,7 +104,13 @@
                   ;; snapshot the blocks did. Reading them separately would
                   ;; let a tick land in between and pair a block with a
                   ;; certificate for a different one.
-                  (store/sink-blocks! data-dir fresh (:qcs s) (:hash-fn s)))
+                  ;; Revisit the bounded committed tail. A record may become
+                  ;; durable one transition before its QC is locally visible;
+                  ;; the next commit then fills the proof without an
+                  ;; unbounded scan of historical blocks.
+                  (store/sink-blocks! data-dir
+                                      (take-last r/resume-tail (:committed s))
+                                      (:qcs s) (:hash-fn s)))
                 (store/write-snapshot! data-dir (r/snapshot s))))
 
             (ship! [outbox]

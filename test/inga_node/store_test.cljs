@@ -6,7 +6,8 @@
             ["node:os" :as os]
             ["node:path" :as path]
             [inga-node.store :as store]
-            [inga-node.identity :as ident]))
+            [inga-node.identity :as ident]
+            [inga-node.seams :as seams]))
 
 (defn- tmp []
   (fs/mkdtempSync (path/join (os/tmpdir) "inga-node-test-")))
@@ -62,6 +63,19 @@
       (store/sink-blocks! d [(block (rec "g" 0 "loser"))])
       (is (= 1 (store/count-records d)))
       (is (= "winner" (get (store/head-of d "g") "cid"))))))
+
+(deftest a-late-certificate-backfills-the-existing-record-proof
+  (testing "record visibility must not permanently suppress quorum evidence"
+    (let [d (tmp)
+          b (block (rec "g" 0 "cid-a"))
+          bh (seams/hash-fn b)
+          qc {:inga.qc/block-hash bh :inga.qc/witnesses #{"w1" "w2" "w3"}}]
+      (is (= 1 (store/sink-blocks! d [b] nil seams/hash-fn)))
+      (is (nil? (store/proof-text d "g" 0)))
+      (is (zero? (store/sink-blocks! d [b] {bh qc} seams/hash-fn))
+          "only the proof is filled; the record is not counted twice")
+      (is (string? (store/proof-text d "g" 0))
+          "the same committed block acquires its proof after the QC arrives"))))
 
 (deftest a-proposal-this-node-cannot-read-is-skipped
   (testing "the log is shared; another consumer's entry must not stop the ref plane"

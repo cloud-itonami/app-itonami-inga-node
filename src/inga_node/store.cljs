@@ -124,6 +124,19 @@
              (js/encodeURIComponent (get rec "ref"))
              (str (pad (get rec "seq")) ".edn")))
 
+(defn- write-proof-if-available!
+  "Fill a proof sidecar once this replica can see the block certificate.
+
+  Record durability and certificate visibility can land on adjacent
+  three-chain transitions. An existing record therefore must not suppress a
+  later proof write."
+  [data-dir block rec qcs hash-fn]
+  (when-let [qc (and hash-fn qcs (get qcs (hash-fn block)))]
+    (let [pf (proof-path data-dir rec)]
+      (when-not (fs/existsSync pf)
+        (ensure-dir! (path/dirname pf))
+        (fs/writeFileSync pf (proof/encode {:block block :qc qc}) "utf8")))))
+
 (defn sink-blocks!
   "Write every head record in `blocks` that is not already logged, and beside
   it the proof that it was committed. Returns how many records were created.
@@ -143,28 +156,15 @@
   ([data-dir blocks qcs hash-fn]
    (reduce
     (fn [n [block rec]]
-      (let [f (record-path data-dir rec)]
-        (if (fs/existsSync f)
-          n
-          (do (ensure-dir! (path/dirname f))
-              (fs/writeFileSync f (js/JSON.stringify (clj->js rec)) "utf8")
-              (when-let [qc (and hash-fn qcs (get qcs (hash-fn block)))]
-                (let [pf (proof-path data-dir rec)]
-                  (ensure-dir! (path/dirname pf))
-                  ;; Written AFTER the record, so a crash between the two
-                  ;; leaves a record without a proof rather than a proof
-                  ;; without a record. A reader treats the first as
-                  ;; unverifiable and the second as a phantom head.
-                  ;; `*print-namespace-maps*` pinned off, the same reason
-                  ;; `kekkai.envelope` pins it: a map whose keys share a
-                  ;; namespace prints as `#:inga.qc{…}` by default in some
-                  ;; contexts and not others, so a file written by hand and a
-                  ;; file written by this process would differ. `clojure.edn`
-                  ;; reads both, so this is stability rather than correctness
-                  ;; — and a proof that reads back differently depending on
-                  ;; who wrote it is a proof nobody can diff.
-                  (fs/writeFileSync pf (proof/encode {:block block :qc qc}) "utf8")))
-              (inc n)))))
+      (let [f (record-path data-dir rec)
+            existed? (fs/existsSync f)]
+        (when-not existed?
+          (ensure-dir! (path/dirname f))
+          (fs/writeFileSync f (js/JSON.stringify (clj->js rec)) "utf8"))
+        ;; Written after the record: a crash or late certificate leaves a
+        ;; recoverable record-without-proof, never a phantom proof.
+        (write-proof-if-available! data-dir block rec qcs hash-fn)
+        (if existed? n (inc n))))
     0
     (for [b blocks
           rec (keep decode-proposal (:inga.block/proposals b))]
