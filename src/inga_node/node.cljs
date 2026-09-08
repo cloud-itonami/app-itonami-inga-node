@@ -27,7 +27,7 @@
   `setInterval` we choose — and the view budget is derived from THAT
   rather than from a vendor's cron floor. See `:params` below for what the
   ratio has to be and what it cost to find out."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             ["ws" :as ws]
             ["node:http" :as http]
             [inga.replica :as r]

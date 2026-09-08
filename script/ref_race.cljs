@@ -19,7 +19,7 @@
 ;; cannot tell "one won" from "both won" would report success either way, and
 ;; the point of the exercise is exactly that distinction.
 (ns ref-race
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [inga.commitment :as cm]
             [inga.consensus :as c]
             [inga.ref :as ref]

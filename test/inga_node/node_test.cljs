@@ -14,7 +14,7 @@
   exactly what `inga.replica/snapshot` carries and what a cold start would
   silently discard."
   (:require [clojure.test :refer [deftest is testing async]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]

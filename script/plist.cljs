@@ -16,7 +16,7 @@
 ;; error — launchd simply does not load it — which is the hardest failure to
 ;; notice, and this workspace has hit it before (com.gftd.observatory-run).
 (ns plist
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn -main [& [witness]]
   (when (str/blank? (or witness ""))

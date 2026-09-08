@@ -26,7 +26,7 @@
   Neither is a consensus primitive. Both are projections of a decision the
   quorum already made, which is why a filesystem is an honest place for them
   and a vendor's conditional write would not have been (ADR-2608039000)."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.edn :as edn]
             [inga-node.proof :as proof]
             ["node:fs" :as fs]
