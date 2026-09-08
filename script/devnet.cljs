@@ -12,7 +12,7 @@
 ;; and require that it catches up to the same committed height. A restart
 ;; that silently starts cold would still pass the first half.
 (ns devnet
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             ["node:child_process" :as cp]
             ["node:fs" :as fs]
             ["node:path" :as path]

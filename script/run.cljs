@@ -11,7 +11,7 @@
 ;; The seed is NOT in this list. It is generated on first start into
 ;; INGA_NODE_DATA and never leaves the machine — see inga-node.identity.
 (ns run
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [inga-node.identity :as ident]
             [inga-node.node :as node]))
 

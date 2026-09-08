@@ -18,7 +18,7 @@
 ;; of this repository to hold an identity. Shipping comes later, and by then
 ;; the keys already exist.
 (ns fleet
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             ["node:child_process" :as cp]))
 
 (def ^:private port-base 19401)
