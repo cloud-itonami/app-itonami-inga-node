@@ -1,6 +1,6 @@
 ;; Four witnesses, four OS PROCESSES, and a kill.
 ;;
-;;   nbb --classpath "src:<inga>/src" script/devnet.cljk
+;;   kbb --backend sci --classpath "src:<inga>/src" script/devnet.cljk
 ;;
 ;; The point is not that consensus works — `inga`'s own harness proves that,
 ;; in one process. The point is the thing a Durable Object was being used
