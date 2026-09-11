@@ -22,4 +22,7 @@
   "src/inga_node/archive.cljk" ".cljs"
   "test/inga_node/archive_test.cljk" ".cljs"
   "script/test-archive.cljk" ".cljs"
+  "src/inga_node/archive_runtime.cljk" ".cljs"
+  "src/inga_node/runtime.cljk" ".cljs"
+  "test/inga_node/archive_runtime_test.cljk" ".cljs"
  }}

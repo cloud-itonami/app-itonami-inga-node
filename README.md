@@ -359,3 +359,37 @@ still searches `.cljs/.cljc/.clj`, so canonical startup/tests are currently
 blocked before loading `inga-node.proof`. Any byte-identical diagnostic mirror
 is logic evidence only, never a production startup result. The canonical
 source files remain `.cljk`; the shared toolchain owns extension resolution.
+
+### Official startup lifecycle
+
+`script/run.cljk` now composes `inga-node.runtime/start!`. Archive remains
+opt-in: `INGA_ARCHIVE_ENABLED=1` requires `INGA_ARCHIVE_AUTHORIZER`, an absolute
+path to an operator-approved executable that returns a **fresh** Authorization
+header value on stdout for each invocation. It runs without a shell, with a
+10-second timeout and a 64 KiB output bound. This repository supplies no
+production signer, discovers no credentials, and never reuses the witness key
+for archive writes. Provisioning and using a production signer requires its
+own operator authorization. Library callers may supply the synchronous
+`:authorization` callback directly; tests use synthetic authorization only.
+
+`INGA_ARCHIVE_INTERVAL_MS` defaults to 1000. One capture runs at a time; an
+unchanged certified tip does not repeat a write. After successful PUT and
+verified GET, the descriptor is atomically written and fsynced to
+`INGA_NODE_DATA/archive-checkpoint.edn`. This separate locator does not modify
+the consensus snapshot. Restart re-reads the remote object and validates the
+entire proof and descriptor before starting the witness. Corrupt/missing
+checkpoint restoration fails startup; it never silently starts fresh.
+
+`GET /finalized-prefix` serves the last durable checkpoint with `no-store`;
+when waiting or capture has failed, it returns 503 with the archive status.
+`?checkpoint=<CID>` retains immutable verified lookup semantics. Captures that
+lack genesis or overlap, exceed the fixed **256 blocks / 8 MiB** bounds, or fail
+remote readback cannot update the pointer or announce success. A long outage
+can leave a gap between checkpoint and bounded replica tail, which must be
+recovered from genuine history before capture can resume. Stopping the
+controller cancels scheduling and prevents an in-flight result from advancing
+the pointer; an already sent immutable PUT may still finish remotely.
+
+This is a bounded lifecycle integration, not scalable reservation finality.
+The deployed `inga-reservation-20260911-v1` chain already exceeds the bound;
+turning this option on does not make that chain reservation-qualified.

@@ -1,0 +1,34 @@
+(ns inga-node.runtime
+  "Official startup composition. Archive is explicitly opt-in and bounded."
+  (:require [inga-node.node :as node]
+            [inga-node.archive-runtime :as archive-runtime]
+            [inga-node.seams :as seams]
+            [inga.replica :as replica]
+            [inga.consensus :as consensus]))
+
+(defn start!
+  "Start the witness after archive restoration. An enabled archive requires
+  an authorization callback explicitly supplied by the host. Test transports
+  may inject fetch-fn; the archive authority is always kotobase.net."
+  [{archive-options :archive :as cfg}]
+  (let [opts (dissoc cfg :archive)
+        context {:chain-id (:chain-id cfg) :witnesses (:witnesses cfg)
+                 :quorum (consensus/quorum-size (count (:witnesses cfg)))
+                 :genesis (first (:chain (replica/replica {:hash-fn seams/hash-fn :witness (:witness cfg)
+                                                         :witnesses (:witnesses cfg)})))
+                 :hash-fn seams/hash-fn :verify-fn (seams/verify-fn (:pubkeys cfg))
+                 :max-blocks 256}]
+    (-> (if archive-options
+          (archive-runtime/open! (assoc archive-options :data-dir (:data-dir cfg) :context context))
+          (js/Promise.resolve nil))
+        (.then (fn [archive]
+                 (try
+                   (let [n (node/start! (cond-> opts archive (assoc :prefix-service (:response! archive))))]
+                     (when archive ((:attach! archive) (:state n)))
+                     (assoc n :archive archive
+                            :stop! (fn []
+                                     (when archive ((:stop! archive)))
+                                     ((:stop! n)))))
+                   (catch :default e
+                     (when archive ((:stop! archive)))
+                     (throw e))))))))
