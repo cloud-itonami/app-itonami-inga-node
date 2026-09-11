@@ -46,7 +46,7 @@ INGA_WITNESS=w1 INGA_WITNESSES=w1,w2,w3,w4,w5,w6,w7 \
 INGA_PEERS='w2=ws://judah:19402,w3=ws://levi:19403,...' \
 INGA_PUBKEYS='w2=<hex>,w3=<hex>,...' \
 INGA_PORT=19401 INGA_TICK_MS=1000 INGA_NODE_DATA=~/.inga/w1 \
-nbb --classpath "src:../inga/src" script/run.cljk
+kbb --backend sci --classpath "src:../inga/src" script/run.cljk
 ```
 
 `INGA_PRINT_PUBKEY=1` mints the seed if absent, prints `w1=<hex>` and exits —
@@ -61,9 +61,9 @@ the bootstrap step, run once per node, whose output is public.
 ## The devnet, and what it currently proves
 
 ```bash
-nbb --classpath "src:../inga/src" script/devnet.cljk      # 7 processes, one gets killed
-SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljk
-N=4 nbb --classpath "src:../inga/src" script/devnet.cljk
+kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk      # 7 processes, one gets killed
+SKIP_KILL=1 kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk
+N=4 kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk
 ```
 
 **The default run passes** (measured 2026-08-11, against `inga` at
@@ -124,7 +124,7 @@ restated.
 The proof's format lives in its own portable `inga_node.proof` — the store is
 `.cljs` because it is a filesystem, and a `.cljc` namespace that requires a
 ClojureScript one is portable in name only. clj-kondo said so before a
-consumer did; `clojure -M -e \"(require 'inga-node.ref)\"` on a JVM is the
+consumer did; `kbb -M -e \"(require 'inga-node.ref)\"` on a JVM is the
 check that it is not just quiet.
 
 `ref_test` drives it over the **real bytes**: `store/sink-blocks!` writes the
@@ -148,7 +148,7 @@ the answer read from a **third** that received neither.
 ```bash
 npm install
 INGA_CP="src:<inga>/src:<kotobase-storage>/src" \
-  nbb --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljk
+  kbb --backend sci --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljk
 ```
 
 The decision procedure is not reimplemented — `inga.ref/project` folds the
@@ -193,8 +193,8 @@ The script now projects the log.
 ## Standing witnesses up on a fleet
 
 ```bash
-nbb script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
-nbb script/fleet.cljk config  judah,benjamin,simeon,joseph
+kbb --backend sci script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
+kbb --backend sci script/fleet.cljk config  judah,benjamin,simeon,joseph
 ```
 
 `pubkeys` mints `~/.inga/<witness>/seed` on each host if it is absent, 0600,
@@ -259,7 +259,7 @@ script/devnet.cljk           seven processes and a kill
 
 ```bash
 INGA_SRC=../inga/src npm test          # 20 unit tests, ~2s
-nbb --classpath "src:../inga/src" script/devnet.cljk   # 7 processes, ~1min
+kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk   # 7 processes, ~1min
 ```
 
 The unit suite covers the three pieces that REPLACE the Durable Object —

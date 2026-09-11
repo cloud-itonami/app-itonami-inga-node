@@ -1,6 +1,6 @@
 ;; A launchd job per witness, printed for a host.
 ;;
-;;   nbb script/plist.cljk w1 > com.gftd.inga-node.plist
+;;   kbb --backend sci script/plist.cljk w1 > com.gftd.inga-node.plist
 ;;
 ;; `nohup` was how the fleet was first stood up and it is not a deployment:
 ;; the process dies with the login session and does not come back after a
@@ -20,7 +20,7 @@
 
 (defn -main [& [witness]]
   (when (str/blank? (or witness ""))
-    (println "usage: nbb script/plist.cljk <witness>")
+    (println "usage: kbb --backend sci script/plist.cljk <witness>")
     (js/process.exit 2))
   (println
    (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
