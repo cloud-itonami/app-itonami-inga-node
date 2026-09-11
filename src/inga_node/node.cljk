@@ -58,7 +58,7 @@
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
-  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port tick-ms view-ms data-dir]}]
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port tick-ms view-ms data-dir prefix-service]}]
   (let [opts {:witness witness
               :witnesses witnesses
               :quorum (c/quorum-size (count witnesses))
@@ -197,6 +197,17 @@
                                        :peers-in (srv/peer-count registry)
                                        :records (store/count-records data-dir)
                                        :counts @counts}))
+
+                          (= p "/finalized-prefix")
+                          (if-not prefix-service
+                            (json-res res 503 {:ok false :error "prefix archive not configured"})
+                            (-> (js/Promise.resolve nil)
+                                (.then (fn [_] (prefix-service {:method (.-method req)
+                                                              :checkpoint (.get (.-searchParams url) "checkpoint")})))
+                                (.then (fn [{:keys [status headers body]}]
+                                         (.writeHead res status (clj->js headers))
+                                         (.end res body)))
+                                (.catch (fn [_] (json-res res 503 {:ok false :error "prefix archive unavailable"})))))
 
                           (= p "/committed")
                           (let [ref (.get (.-searchParams url) "ref")
