@@ -272,3 +272,25 @@ assertions. One that did NOT bite is recorded rather than quietly fixed — the
 zero-padding turned out not to be load-bearing for `head-of`, which parses
 numbers instead of comparing filenames, so the docstring claiming otherwise
 was wrong and now says so.
+
+### Vote durability and restart boundary
+
+Every `advance!` transition now persists its next replica snapshot before
+shipping its outbox. Snapshot writes fsync the file, rename it, and fsync the
+directory. A persistence error emits no messages from that transition and
+poisons the running instance; subsequent `/submit` requests receive 503 rather
+than overwriting an uncertain durable state. The requester must treat that
+response as unresolved, not as evidence that its proposal lost.
+
+Unreadable, incompatible, wrong-witness, or vote-watermark-free snapshots fail
+startup. Restore the witness's durable state; do not delete it to resume using
+the same key. A missing snapshot is still allowed for first boot: protecting
+against disk deletion/rollback and cloned processes requires deployment-level
+identity ownership/recovery fencing. Local files are not that fencing, and a
+single event loop does not exclude another process holding the same key.
+
+The unit suite exercises the actual `advance!` closure returned by `start!`,
+real signed replica transitions, injected persistence failure, and a second
+`start!` with the same key after stopping before/after shipment. Delivery is
+captured locally. These are deterministic crash-boundary tests, not power-loss
+or multi-host network qualification. All keys in tests are newly generated.

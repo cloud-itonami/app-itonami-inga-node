@@ -2,20 +2,10 @@
   "What survives a restart: this witness's own state, and the log everyone
   agreed about.
 
-  ## This is the half a Durable Object was being used for
-
-  The Cloudflare deployment got three things from a DO — a single writer, an
-  address, and a place to keep a bounded snapshot. A long-lived process is
-  the first two by construction. This file is the third, and it is a
-  filesystem, which is the point: **delete this directory and the witness
-  rejoins from its peers.** `inga.sync` is how a replica behind the others
-  catches up, and a witness with no snapshot is simply the most behind.
-
-  ## Two different durabilities, deliberately
-
-  `snapshot` is PRIVATE working state, bounded by `inga.replica/snapshot`
-  itself (`resume-tail` blocks, one committed block). Losing it costs this
-  witness its head start, nothing more.
+  `snapshot` includes safety state, not just a performance cache. It must
+  be durable before votes leave. Losing it or rolling it back while reusing
+  the witness key can permit equivocation; peer catch-up does not recover
+  the last vote the witness sent. Only an unused identity may start cold.
 
   `committed` is the SHARED log — one file per `(ref, seq)`, which is the
   identity the ref plane arbitrates, so the same record committed by four
@@ -23,9 +13,9 @@
   contend for one sequence the log's ORDER decided it and a later write would
   contradict the thing that decided.
 
-  Neither is a consensus primitive. Both are projections of a decision the
-  quorum already made, which is why a filesystem is an honest place for them
-  and a vendor's conditional write would not have been (ADR-2608039000)."
+  The committed files are projections, not consensus primitives. Snapshot
+  durability is a precondition of the witness protocol, and depends on a
+  filesystem honoring fsync and a single process owning this directory."
   (:require [kotoba.lang.text :as str]
             [clojure.edn :as edn]
             [inga-node.proof :as proof]
@@ -44,30 +34,32 @@
   process dies mid-write, and a half-read snapshot is refused by
   `inga.replica/resume` — which turns a crash into a witness that will not
   start. `rename` within one filesystem is atomic, so the file a reader sees
-  is always a whole one."
+  is always a whole one. Flush the file before rename and the directory
+  after rename; atomic visibility alone is not crash durability."
   [data-dir snap]
   (ensure-dir! data-dir)
   (let [f (snapshot-path data-dir)
         tmp (str f ".tmp")]
-    (fs/writeFileSync tmp (pr-str snap) "utf8")
-    (fs/renameSync tmp f)))
+    (let [fd (fs/openSync tmp "w")]
+      (try
+        (fs/writeFileSync fd (pr-str snap) "utf8")
+        (fs/fsyncSync fd)
+        (finally (fs/closeSync fd))))
+    (fs/renameSync tmp f)
+    (let [fd (fs/openSync data-dir "r")]
+      (try (fs/fsyncSync fd) (finally (fs/closeSync fd))))))
 
 (defn read-snapshot
-  "The stored snapshot, or nil.
-
-  Unreadable is treated as absent, and that is a decision rather than
-  laziness: a stored value this version cannot parse must not brick the
-  witness forever, because the failure is in the LOAD and every retry hits it
-  again. Starting cold costs this witness its history — the others have it —
-  while refusing to start costs the network a witness with no way back."
+  "The stored snapshot, or nil on first boot. Corruption fails closed:
+  discarding a vote watermark can make the same witness equivocate. The
+  operator must restore its durable state, not reuse its key from genesis."
   [data-dir]
   (let [f (snapshot-path data-dir)]
     (when (fs/existsSync f)
-      (try (edn/read-string (fs/readFileSync f "utf8"))
-           (catch :default _
-             (js/console.warn "inga-node: unreadable snapshot, starting cold")
-             (try (fs/unlinkSync f) (catch :default _ nil))
-             nil)))))
+      (let [snap (edn/read-string (fs/readFileSync f "utf8"))]
+        (when-not (map? snap)
+          (throw (ex-info "inga-node: snapshot is not a map" {})))
+        snap))))
 
 ;; ── the shared committed log ────────────────────────────────────────────────
 

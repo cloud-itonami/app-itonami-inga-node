@@ -31,13 +31,11 @@
 (deftest a-missing-snapshot-is-nil-not-an-error
   (is (nil? (store/read-snapshot (tmp)))))
 
-(deftest an-unreadable-snapshot-starts-cold-and-does-not-brick
-  (testing "the failure is in the LOAD, so every retry hits it again"
-    (let [d (tmp)]
-      (fs/writeFileSync (store/snapshot-path d) "{:this is not( readable" "utf8")
-      (is (nil? (store/read-snapshot d)))
-      (is (not (fs/existsSync (store/snapshot-path d)))
-          "and the poison is removed, so the next start is clean"))))
+(deftest an-unreadable-snapshot-fails-closed
+  (let [d (tmp)]
+    (fs/writeFileSync (store/snapshot-path d) "{:this is not( readable" "utf8")
+    (is (thrown? js/Error (store/read-snapshot d)))
+    (is (fs/existsSync (store/snapshot-path d)))))
 
 (deftest snapshot-leaves-no-temp-file-behind
   (let [d (tmp)]

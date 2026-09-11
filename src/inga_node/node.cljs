@@ -13,10 +13,9 @@
   | an address | a port |
   | a bounded snapshot | a file (`inga-node.store`) |
 
-  The first row is the whole reason the DO was reached for, and it is free
-  here: a witness is a single-threaded state machine and so is a Node
-  process, so the property arrives by construction rather than by asking a
-  vendor for it.
+  A process serializes its own events only. The deployment must prevent
+  two processes using one witness key and must retain its durable vote state
+  without rollback. This node does not fence cloned processes or lost disks.
 
   ## The tick is ours now
 
@@ -57,7 +56,8 @@
     :tick-ms    int
     :data-dir   string
 
-  Returns `{:stop! fn :state atom}`."
+  Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
+  durable transition path used by ticks and inbound messages."
   [{:keys [witness witnesses peers pubkeys seed-hex chain-id port tick-ms view-ms data-dir]}]
   (let [opts {:witness witness
               :witnesses witnesses
@@ -82,23 +82,22 @@
               :sign-fn (seams/sign-fn seed-hex)
               :verify-fn (seams/verify-fn pubkeys)}
         snap (store/read-snapshot data-dir)
-        state (atom (if snap
-                      (try (r/resume opts snap)
-                           (catch :default e
-                             (js/console.warn "inga-node: resume refused —"
-                                              (.-message e) "— starting cold")
-                             (r/replica opts)))
-                      (r/replica opts)))
+        _ (when (and snap
+                     (or (not= (wire/wire-id witness) (:witness snap))
+                         (not (integer? (:voted-view snap)))
+                         (not (integer? (:voted-below snap)))))
+            (throw (ex-info "inga-node: snapshot lacks this witness's durable vote state" {})))
+        state (atom (if snap (r/resume opts snap) (r/replica opts)))
+        failed? (atom false)
         registry (atom {})
         out-node (atom nil)
         counts (atom {:sent 0 :recv 0})]
-    (letfn [(persist! [before]
+    (letfn [(persist! [s before]
               ;; The sink lives HERE, next to the only place `:committed` can
               ;; grow, rather than at each caller. A decision centralised in
               ;; one function but invoked from three call sites is a plane
               ;; that is on in two of them.
-              (let [s @state
-                    fresh (vec (drop before (:committed s)))]
+              (let [fresh (vec (drop before (:committed s)))]
                 (when (seq fresh)
                   ;; The certificates and the hash come from the SAME state
                   ;; snapshot the blocks did. Reading them separately would
@@ -134,11 +133,20 @@
                   (when (:send! s) ((:send! s) msg)))))
 
             (advance! [f]
+              (when @failed?
+                (throw (ex-info "inga-node: persistence failed; restart required" {})))
               (let [before (count (:committed @state))
                     [s' out] (f @state)]
+                ;; No vote leaves before its safety state is durable.
+                ;; A failure poisons this running instance: the rename may
+                ;; have succeeded before directory fsync failed.
+                (try
+                  (persist! s' before)
+                  (catch :default e
+                    (reset! failed? true)
+                    (throw e)))
                 (reset! state s')
-                (ship! out)
-                (persist! before)))
+                (ship! out)))
 
             (feed! [msg]
               (swap! counts update :recv inc)
@@ -156,6 +164,9 @@
                       (let [url (js/URL. (.-url req) "http://localhost")
                             p (.-pathname url)]
                         (cond
+                          @failed?
+                          (json-res res 503 {:ok false :error "persistence failed; restart required"})
+
                           (= p "/health")
                           (let [s @state]
                             (json-res res 200
@@ -218,9 +229,11 @@
                                          m (when rec (js->clj rec))]
                                      (if-not (and (map? m) (get m "ref") (get m "cid"))
                                        (json-res res 400 {:ok false :error "record required"})
-                                       (do (swap! state r/submit (js/JSON.stringify (clj->js m)))
-                                           (store/write-snapshot! data-dir (r/snapshot @state))
-                                           (json-res res 200 {:ok true :submitted true})))))))
+                                       (try
+                                         (advance! (fn [s] [(r/submit s (js/JSON.stringify (clj->js m))) []]))
+                                         (json-res res 200 {:ok true :submitted true})
+                                         (catch :default _
+                                           (json-res res 503 {:ok false :error "persistence failed; restart required"}))))))))
 
                           :else (json-res res 404 {:ok false :error "not found"})))))
             wss (ws/WebSocketServer. #js {:server server})
@@ -258,6 +271,7 @@
                                " peers=" (str/join "," (keys peers))
                                " tick=" tick-ms "ms data=" data-dir))
           {:state state
+           :advance! advance!
            :stop! (fn []
                     (js/clearInterval iv)
                     (when-let [nd @out-node] ((:close-all! nd)))

@@ -20,7 +20,11 @@
             ["node:path" :as path]
             [inga-node.identity :as ident]
             [inga-node.store :as store]
-            [inga-node.node :as node]))
+            [inga-node.node :as node]
+            [inga-node.seams :as seams]
+            [inga.replica :as r]
+            [inga.net.ws :as nws]
+            ["node:crypto" :as crypto]))
 
 (defn- tmp [] (fs/mkdtempSync (path/join (os/tmpdir) "inga-node-node-")))
 
@@ -94,24 +98,12 @@
                      (done)))
             (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (done))))))))
 
-(deftest an-unusable-snapshot-starts-cold-instead-of-refusing-to-boot
-  (testing "the failure is in the LOAD, so refusing would make it permanent"
-    (async raw-done
-      (let [done (once raw-done)
-            d (tmp) p (port 4)]
-        ;; mint the seed first so the only broken thing is the snapshot
-        (ident/ensure-seed! d)
-        (fs/writeFileSync (store/snapshot-path d) "{:truncated" "utf8")
-        (let [n (boot d p)]
-          (-> (GET p "/health")
-              (.then (fn [h]
-                       (is (true? (aget h "ok"))
-                           "a poisoned snapshot must not stop the witness from starting")
-                       ((:stop! n))
-                       (done)))
-              (.catch (fn [e]
-                        (is false (str "a bad snapshot stopped the boot: " (or (.-message e) e)))
-                        (done)))))))))
+(deftest an-unusable-snapshot-refuses-to-boot
+  (doseq [contents ["{:truncated" "{:inga.snapshot/version -1}" "nil" "false" "{}"]]
+    (let [d (tmp)]
+      (fs/writeFileSync (store/snapshot-path d) contents "utf8")
+      (is (thrown? js/Error (boot d (port 4))))
+      (is (= contents (fs/readFileSync (store/snapshot-path d) "utf8"))))))
 
 (deftest submit-refuses-a-record-that-is-not-one
   (async raw-done
@@ -164,3 +156,79 @@
                    ((:stop! n))
                    (done)))
           (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (done)))))))
+
+;; Tests call the actual advance! closure returned by start!, using the real
+;; signed replica transition. Only transport delivery and failure injection
+;; are replaced. No network peer, credential store, or funds are involved.
+(defn- boot-captured
+  ([d sent] (boot-captured d sent (.toString (crypto/randomBytes 32) "hex")))
+  ([d sent seed]
+    (with-redefs [nws/make-node
+                  (fn [_] {:tick! (fn []) :close-all! (fn [])
+                           :broadcast! (fn [msg]
+                                         (when (= :vote (:type msg))
+                                           (is (>= (:voted-view (store/read-snapshot d)) 0)
+                                               "durable vote watermark precedes real ship!"))
+                                         (swap! sent conj msg))})]
+      (assoc (node/start! {:witness "w2" :witnesses ["w1" "w2" "w3" "w4"]
+                    :peers {} :pubkeys {"w2" (seams/public-hex seed)}
+                    :seed-hex seed :chain-id "durability-test" :port 0
+                    :tick-ms 100000 :data-dir d}) :test-seed seed))))
+
+(deftest persist-failure-emits-zero-votes-and-poisons-instance
+  (let [d (tmp) sent (atom []) n (boot-captured d sent)]
+    (try
+      (with-redefs [store/write-snapshot! (fn [& _] (throw (js/Error. "disk failure")))]
+        (is (thrown? js/Error ((:advance! n) #(r/start % 0)))))
+      (is (empty? @sent))
+      (is (= -1 (r/voted-view @(:state n))))
+      (is (thrown? js/Error ((:advance! n) #(r/start % 0))))
+      (is (empty? @sent))
+      (finally ((:stop! n))))))
+
+(deftest persisted-vote-survives-stop-before-and-after-shipping
+  (doseq [crash-before-ship? [true false]]
+    (let [d (tmp) sent (atom []) n (boot-captured d sent)
+          write! store/write-snapshot! saved (atom nil)]
+      (try
+        (if crash-before-ship?
+          (with-redefs [store/write-snapshot!
+                        (fn [dir snap]
+                          (write! dir snap)
+                          (reset! saved snap)
+                          (throw (js/Error. "stop after durable write before ship")))]
+            (is (thrown? js/Error ((:advance! n) #(r/start % 0)))))
+          (do ((:advance! n) #(r/start % 0))
+              (reset! saved (store/read-snapshot d))))
+        (is (>= (:voted-view @saved) 0))
+        (is (= crash-before-ship? (empty? @sent)))
+        (when-not crash-before-ship?
+          (is (some #(= :vote (:type %)) @sent)))
+        (finally ((:stop! n))))
+      ;; A second real start! restores the durable snapshot with the SAME key.
+      (let [resent (atom []) n2 (boot-captured d resent (:test-seed n))]
+        (try
+          (let [resumed @(:state n2)
+                tip (r/tip resumed)
+                conflicting (assoc tip :inga.block/proposals ["different-intent"])]
+            (is (= (:voted-view @saved) (r/voted-view resumed)))
+            ((:advance! n2) #(r/on-message % {:type :proposal :block conflicting} 1))
+            (is (not-any? #(= :vote (:type %)) @resent))
+            (is (= (seams/hash-fn tip) (seams/hash-fn (r/tip @(:state n2))))))
+          (finally ((:stop! n2))))))))
+
+(deftest failed-instance-cannot-overwrite-durable-state-through-submit
+  (async done
+    (let [d (tmp) p (port 8) n (boot d p)
+          write! store/write-snapshot!]
+      (with-redefs [store/write-snapshot! (fn [dir snap]
+                                          (write! dir snap)
+                                          (throw (js/Error. "uncertain directory flush")))]
+        (is (thrown? js/Error ((:advance! n) #(vector (r/with-voted-view % 9) [])))))
+      (let [before (fs/readFileSync (store/snapshot-path d) "utf8")]
+        (-> (POST p "/submit" {"record" (rec "g" 0 "other")})
+            (.then (fn [[status _]]
+                     (is (= 503 status))
+                     (is (= before (fs/readFileSync (store/snapshot-path d) "utf8")))))
+            (.catch (fn [e] (is false (str e))))
+            (.finally (fn [] ((:stop! n)) (done))))))))
