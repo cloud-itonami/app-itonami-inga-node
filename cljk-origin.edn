@@ -18,4 +18,8 @@
   "test/inga_node/node_test.cljk" ".cljs"
   "test/inga_node/ref_test.cljk" ".cljs"
   "test/inga_node/seams_test.cljk" ".cljs"
-  "test/inga_node/store_test.cljk" ".cljs"}}
+  "test/inga_node/store_test.cljk" ".cljs"
+  "src/inga_node/archive.cljk" ".cljs"
+  "test/inga_node/archive_test.cljk" ".cljs"
+  "script/test-archive.cljk" ".cljs"
+ }}

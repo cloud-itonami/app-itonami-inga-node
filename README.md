@@ -351,5 +351,11 @@ Source integration requires `inga.prefix`, `kotobase-client/src`,
 review prerequisite: no unmerged commit is pinned into deps.edn/nbb.edn here.
 This source worktree is therefore **not a packaged production release**. Merge
 and pin the reviewed inga prerequisite before any standalone consumer cutover.
-Run `script/test-archive.cljs` with those paths plus inga/test (the real signed
+Run `script/test-archive.cljk` with those paths plus inga/test (the real signed
 replica fixture), kotobase-storage/src, src and test.
+
+The latest upstream source layout uses `.cljk`. nbb 1.4.208's namespace resolver
+still searches `.cljs/.cljc/.clj`, so canonical startup/tests are currently
+blocked before loading `inga-node.proof`. Any byte-identical diagnostic mirror
+is logic evidence only, never a production startup result. The canonical
+source files remain `.cljk`; the shared toolchain owns extension resolution.
