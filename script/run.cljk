@@ -6,7 +6,7 @@
 ;;   INGA_PEERS='w2=ws://judah:19302,w3=...' \
 ;;   INGA_PUBKEYS='w1=<hex>,w2=<hex>,...' \
 ;;   INGA_PORT=19301 INGA_TICK_MS=1000 INGA_NODE_DATA=~/.inga/w1 \
-;;   nbb --classpath "src:<inga>/src" script/run.cljs
+;;   nbb --classpath "src:<inga>/src" script/run.cljk
 ;;
 ;; The seed is NOT in this list. It is generated on first start into
 ;; INGA_NODE_DATA and never leaves the machine — see inga-node.identity.

@@ -1,7 +1,7 @@
 ;; Standing witnesses up on the murakumo fleet.
 ;;
-;;   nbb script/fleet.cljs pubkeys judah,benjamin,simeon,joseph
-;;   nbb script/fleet.cljs config  judah,benjamin,simeon,joseph
+;;   nbb script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
+;;   nbb script/fleet.cljk config  judah,benjamin,simeon,joseph
 ;;
 ;; ## The seed is minted ON the node and never comes back
 ;;
@@ -82,7 +82,7 @@
   (let [[cmd hosts-arg] args
         hosts (->> (str/split (or hosts-arg "") #",") (map str/trim) (remove str/blank?) vec)]
     (when (or (str/blank? (or cmd "")) (empty? hosts))
-      (println "usage: nbb script/fleet.cljs <pubkeys|config> host1,host2,...")
+      (println "usage: nbb script/fleet.cljk <pubkeys|config> host1,host2,...")
       (js/process.exit 2))
     (let [rs (collect hosts)]
       (doseq [{:keys [host witness ok pubkey err]} rs]

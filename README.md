@@ -46,7 +46,7 @@ INGA_WITNESS=w1 INGA_WITNESSES=w1,w2,w3,w4,w5,w6,w7 \
 INGA_PEERS='w2=ws://judah:19402,w3=ws://levi:19403,...' \
 INGA_PUBKEYS='w2=<hex>,w3=<hex>,...' \
 INGA_PORT=19401 INGA_TICK_MS=1000 INGA_NODE_DATA=~/.inga/w1 \
-nbb --classpath "src:../inga/src" script/run.cljs
+nbb --classpath "src:../inga/src" script/run.cljk
 ```
 
 `INGA_PRINT_PUBKEY=1` mints the seed if absent, prints `w1=<hex>` and exits —
@@ -61,9 +61,9 @@ the bootstrap step, run once per node, whose output is public.
 ## The devnet, and what it currently proves
 
 ```bash
-nbb --classpath "src:../inga/src" script/devnet.cljs      # 7 processes, one gets killed
-SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljs
-N=4 nbb --classpath "src:../inga/src" script/devnet.cljs
+nbb --classpath "src:../inga/src" script/devnet.cljk      # 7 processes, one gets killed
+SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljk
+N=4 nbb --classpath "src:../inga/src" script/devnet.cljk
 ```
 
 **The default run passes** (measured 2026-08-11, against `inga` at
@@ -140,7 +140,7 @@ caller's by construction.
 
 ## Two writers, one ref, one sequence (2026-08-19)
 
-`script/ref_race.cljs` asks the network the question `inga`'s own `ref_test`
+`script/ref_race.cljk` asks the network the question `inga`'s own `ref_test`
 asks a cooperative oracle in-process: two records for the **same `[ref seq]`**
 with different CIDs, submitted **concurrently to two different witnesses**, and
 the answer read from a **third** that received neither.
@@ -148,7 +148,7 @@ the answer read from a **third** that received neither.
 ```bash
 npm install
 INGA_CP="src:<inga>/src:<kotobase-storage>/src" \
-  nbb --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljs
+  nbb --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljk
 ```
 
 The decision procedure is not reimplemented — `inga.ref/project` folds the
@@ -193,8 +193,8 @@ The script now projects the log.
 ## Standing witnesses up on a fleet
 
 ```bash
-nbb script/fleet.cljs pubkeys judah,benjamin,simeon,joseph
-nbb script/fleet.cljs config  judah,benjamin,simeon,joseph
+nbb script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
+nbb script/fleet.cljk config  judah,benjamin,simeon,joseph
 ```
 
 `pubkeys` mints `~/.inga/<witness>/seed` on each host if it is absent, 0600,
@@ -245,21 +245,21 @@ peers that were not listening yet — and it recovers once they are.)
 ## Layout
 
 ```
-src/inga_node/identity.cljs  the seed, minted locally, never sent
-src/inga_node/seams.cljs     hash/sign/verify over node:crypto — byte-identical
+src/inga_node/identity.cljk  the seed, minted locally, never sent
+src/inga_node/seams.cljk     hash/sign/verify over node:crypto — byte-identical
                              to the Worker deployment on purpose
-src/inga_node/store.cljs     snapshot (private, bounded) + committed log
+src/inga_node/store.cljk     snapshot (private, bounded) + committed log
                              (shared, one file per (ref, seq), first write wins)
-src/inga_node/node.cljs      the wiring: sockets, clock, HTTP
-script/run.cljs              one witness from the environment
-script/devnet.cljs           seven processes and a kill
+src/inga_node/node.cljk      the wiring: sockets, clock, HTTP
+script/run.cljk              one witness from the environment
+script/devnet.cljk           seven processes and a kill
 ```
 
 ## Test
 
 ```bash
 INGA_SRC=../inga/src npm test          # 20 unit tests, ~2s
-nbb --classpath "src:../inga/src" script/devnet.cljs   # 7 processes, ~1min
+nbb --classpath "src:../inga/src" script/devnet.cljk   # 7 processes, ~1min
 ```
 
 The unit suite covers the three pieces that REPLACE the Durable Object —

@@ -1,0 +1,21 @@
+{:format :kotoba.cljk-origin/v1
+ :renamed-on "2026-09-11"
+ :decision "adr-2609111500-cljk-rename-all-clojure-source (com-junkawasaki/root 90-docs/adr; owner instruction 2026-09-11)"
+ :rule "value = the extension the file had before the rename. A path ending in .clj.cljk or .cljs.cljk kept it in the name because both platform files existed (or the plain target was taken)."
+ :origins
+ {"script/devnet.cljk" ".cljs"
+  "script/fleet.cljk" ".cljs"
+  "script/plist.cljk" ".cljs"
+  "script/ref_race.cljk" ".cljs"
+  "script/run.cljk" ".cljs"
+  "script/test.cljk" ".cljs"
+  "src/inga_node/identity.cljk" ".cljs"
+  "src/inga_node/node.cljk" ".cljs"
+  "src/inga_node/proof.cljk" ".cljc"
+  "src/inga_node/ref.cljk" ".cljc"
+  "src/inga_node/seams.cljk" ".cljs"
+  "src/inga_node/store.cljk" ".cljs"
+  "test/inga_node/node_test.cljk" ".cljs"
+  "test/inga_node/ref_test.cljk" ".cljs"
+  "test/inga_node/seams_test.cljk" ".cljs"
+  "test/inga_node/store_test.cljk" ".cljs"}}

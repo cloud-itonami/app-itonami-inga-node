@@ -1,6 +1,6 @@
-;; The unit suite. `nbb --classpath "src:test:<inga>/src" script/test.cljs`
+;; The unit suite. `nbb --classpath "src:test:<inga>/src" script/test.cljk`
 ;;
-;; Separate from `script/devnet.cljs`, which spawns processes and takes a
+;; Separate from `script/devnet.cljk`, which spawns processes and takes a
 ;; minute: a suite nobody runs because it is slow is a suite nobody runs.
 (ns test-runner
   (:require [clojure.test :as t]

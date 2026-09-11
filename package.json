@@ -6,7 +6,7 @@
     "ws": "^8.18.0"
   },
   "scripts": {
-    "test": "nbb --classpath \"src:test:$INGA_SRC\" script/test.cljs",
-    "race": "nbb --classpath \"src:$INGA_SRC\" script/ref_race.cljs"
+    "test": "nbb --classpath \"src:test:$INGA_SRC\" script/test.cljk",
+    "race": "nbb --classpath \"src:$INGA_SRC\" script/ref_race.cljk"
   }
 }
