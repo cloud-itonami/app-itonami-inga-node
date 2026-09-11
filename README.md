@@ -294,3 +294,62 @@ real signed replica transitions, injected persistence failure, and a second
 `start!` with the same key after stopping before/after shipment. Delivery is
 captured locally. These are deterministic crash-boundary tests, not power-loss
 or multi-host network qualification. All keys in tests are newly generated.
+
+### Finalized-prefix archive (bounded qualification implementation)
+
+`inga-node.archive` persists a complete prefix and its tip QC as one raw
+CIDv1/sha2-256 EDN bundle on **https://kotobase.net/ipld/:cid**, using the
+existing `kotobase.blocks/client`. It verifies CID before PUT and after GET,
+validates chain/genesis/quorum/finality, and reads back before returning a
+checkpoint descriptor. Qualified keywords and certificate signer sets survive
+EDN round trips. Each PUT obtains a new authorization from the supplied thunk;
+the module does not obtain credentials or contact an alternate provider.
+
+```clojure
+(def a (archive/open {:context trusted-prefix-context
+                      :max-bytes 4194304
+                      :authorization fresh-cacao-authorization}))
+;; Each operation is asynchronous and rejects on failure/unknown outcome.
+(archive/publish! a {:blocks [genesis ... tip] :tip-qc qc})
+;; => Promise<{:cid checkpoint-cid :chain-id ... :genesis-hash ...
+;;             :tip-hash ... :finalized-height ... :block-count ...}>
+(archive/read! a checkpoint-cid) ; => {:checkpoint descriptor :proof proof}
+(archive/capture! a previous-checkpoint-cid replica-state)
+(archive/extend! a previous-checkpoint-cid {:blocks replica-tail :tip-qc qc})
+```
+
+A host explicitly retains the returned checkpoint CID in its Kotobase graph or
+consumer journal. There is no implicit latest-pointer lookup, HeadStore, or
+local authoritative cache. The bundle CID is an immutable locator, not a claim
+that no newer checkpoint exists. After restarting, a new archive object needs
+only this locator and the configured chain trust context to restore everything.
+`extend!` joins a bounded replica tail to that restored prefix and rejects any
+change/removal of previously finalized blocks, gaps and bound overflows.
+`capture!` selects a real replica's highest certified prefix. The host must
+await success before announcing archive durability. The module does not
+schedule captures or publish a mutable discovery index by itself.
+
+Pass `:prefix-service #(archive/response! a %)` to `node/start!` to serve
+`GET /finalized-prefix?checkpoint=<CID>` as `application/edn`. Every 200 is
+revalidated and contains the requested CID and full proof. Invalid/missing
+bundles return 422; unconfigured/unavailable services return 503; non-GET
+returns 405. Existing `/committed` remains the membership-only endpoint.
+
+**Bounds and qualification:** this rewrites/reads O(history) bytes per checkpoint.
+The context's explicit `:max-blocks` (256 in the fixture) and `:max-bytes`
+(at most 8 MiB) are refusals, not pagination or production scalability.
+Missing/mutated/reordered blocks, wrong chain/genesis/checkpoint and malformed
+or insufficient certificates are rejected. The existing block client buffers
+a response before its size check; this is not a streaming memory-DoS bound.
+No live Kotobase write, production credential, deployment or funds movement
+was part of the qualification. Tests use real Ed25519 replica transitions and
+the real block client against a disk-backed mock /ipld service, plus local HTTP
+node restart/serving. They do not qualify remote durability or power loss.
+
+Source integration requires `inga.prefix`, `kotobase-client/src`,
+`org-nist-sha2/src`, and text on the classpath. `inga.prefix` is currently a
+review prerequisite: no unmerged commit is pinned into deps.edn/nbb.edn here.
+This source worktree is therefore **not a packaged production release**. Merge
+and pin the reviewed inga prerequisite before any standalone consumer cutover.
+Run `script/test-archive.cljs` with those paths plus inga/test (the real signed
+replica fixture), kotobase-storage/src, src and test.
