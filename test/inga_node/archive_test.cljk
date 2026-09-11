@@ -76,7 +76,8 @@
   (async done
     (let [dir (tmp) calls (atom []) client (opened dir calls)
           proof (fixture/proof [[fixture/a] [] [] []])
-          variants [[(update proof :blocks #(vec (concat (subvec % 0 1) (subvec % 2)))) :does-not-attach]
+          variants [[(update proof :blocks #(vec (concat (subvec % 0 2) (subvec % 3)))) :non-contiguous]
+                    [(update proof :blocks #(vec (concat (subvec % 0 1) (subvec % 2)))) :does-not-attach]
                     [(assoc-in proof [:blocks 1 :inga.block/ts] 998) :does-not-link]
                     [(update proof :blocks #(assoc % 1 (nth % 2) 2 (nth % 1))) :non-contiguous]]
           valid-cid (seed-bytes! dir (envelope proof))]
