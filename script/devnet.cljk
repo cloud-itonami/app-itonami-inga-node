@@ -1,6 +1,6 @@
 ;; Four witnesses, four OS PROCESSES, and a kill.
 ;;
-;;   nbb --classpath "src:<inga>/src" script/devnet.cljs
+;;   nbb --classpath "src:<inga>/src" script/devnet.cljk
 ;;
 ;; The point is not that consensus works — `inga`'s own harness proves that,
 ;; in one process. The point is the thing a Durable Object was being used
@@ -82,7 +82,7 @@
         ;; zero with no way to ask them why — which turned a five-minute
         ;; diagnosis into guesswork about quorum margins that was wrong.
         log (fs/openSync (path/join (data-of w) "node.log") "a")
-        p (cp/spawn "nbb" #js ["--classpath" classpath "script/run.cljs"]
+        p (cp/spawn "nbb" #js ["--classpath" classpath "script/run.cljk"]
                     #js {:env env :stdio #js ["ignore" log log]})]
     (swap! children conj p)
     p))
