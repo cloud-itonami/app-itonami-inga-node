@@ -9,7 +9,7 @@
   caller's by construction: `-compare-and-set-ref!` is synchronous and Node
   cannot block."
   (:require [kotoba.lang.edn :as edn]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]

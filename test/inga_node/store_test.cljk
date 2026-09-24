@@ -1,7 +1,7 @@
 (ns inga-node.store-test
   "The disk. This is the half a Durable Object was being used for, so it is
   the half that has to survive the process it belongs to."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
