@@ -1,5 +1,5 @@
 (ns inga-node.archive-test
-  (:require [clojure.test :refer [deftest is async]]
+  (:require [kotoba.test :refer [deftest is async]]
             [kotoba.lang.edn :as edn]
             [inga-node.archive :as archive]
             [inga-node.node :as node]

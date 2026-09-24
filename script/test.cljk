@@ -3,7 +3,7 @@
 ;; Separate from `script/devnet.cljk`, which spawns processes and takes a
 ;; minute: a suite nobody runs because it is slow is a suite nobody runs.
 (ns test-runner
-  (:require [clojure.test :as t]
+  (:require [kotoba.test :as t]
             [inga-node.seams-test]
             [inga-node.store-test]
             [inga-node.node-test]
