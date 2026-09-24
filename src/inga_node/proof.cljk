@@ -16,7 +16,7 @@
   certificate then names no block, and every proof fails
   `:block-not-certified` against an empty hash. Measured — that is exactly
   what the first version of this did."
-  (:require [clojure.edn :as edn]))
+  (:require [kotoba.lang.edn :as edn]))
 
 (defn encode
   "The proof as the text that gets stored and served.

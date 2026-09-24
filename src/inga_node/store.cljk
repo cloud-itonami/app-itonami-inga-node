@@ -17,7 +17,7 @@
   durability is a precondition of the witness protocol, and depends on a
   filesystem honoring fsync and a single process owning this directory."
   (:require [kotoba.lang.text :as str]
-            [clojure.edn :as edn]
+            [kotoba.lang.edn :as edn]
             [inga-node.proof :as proof]
             ["node:fs" :as fs]
             ["node:path" :as path]))
