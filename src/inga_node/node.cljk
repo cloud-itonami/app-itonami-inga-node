@@ -31,6 +31,7 @@
             ["node:http" :as http]
             [inga.replica :as r]
             [inga.consensus :as c]
+            [inga.prefix :as prefix]
             [inga.wire :as wire]
             [inga.net.ws :as nws]
             [inga.net.server :as srv]
@@ -79,10 +80,12 @@
     :bind       optional local interface address (for example a tailnet IP)
     :tick-ms    int
     :data-dir   string
+    :archive-finalized?  retain every finalized block from a fresh genesis
+    :archive-http?       expose an opt-in complete-prefix evidence endpoint
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
-  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service]}]
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service archive-finalized? archive-http?]}]
   (let [opts {:witness witness
               :witnesses witnesses
               :quorum (c/quorum-size (count witnesses))
@@ -106,6 +109,8 @@
               :sign-fn (seams/sign-fn seed-hex)
               :verify-fn (seams/verify-fn pubkeys)}
         snap (store/read-snapshot data-dir)
+        _ (when archive-finalized?
+            (store/verify-finalized-archive! data-dir snap (:hash-fn opts)))
         _ (when (and snap
                      (or (not= (wire/wire-id witness) (:witness snap))
                          (not (integer? (:voted-view snap)))
@@ -124,6 +129,8 @@
               ;; that is on in two of them.
               (let [fresh (vec (drop before (:committed s)))]
                 (when (seq fresh)
+                  (when archive-finalized?
+                    (store/append-finalized! data-dir fresh (:qcs s) (:hash-fn s)))
                   ;; The certificates and the hash come from the SAME state
                   ;; snapshot the blocks did. Reading them separately would
                   ;; let a tick land in between and pair a block with a
@@ -234,6 +241,34 @@
                                          (.writeHead res status (clj->js headers))
                                          (.end res body)))
                                 (.catch (fn [_] (json-res res 503 {:ok false :error "prefix archive unavailable"})))))
+
+                          (= p "/local-finalized-prefix")
+                          (if-not (and archive-finalized? archive-http?
+                                       (= "GET" (.-method req)))
+                            (json-res res 404 {:ok false :error "not found"})
+                            (try
+                              (let [s @state
+                                    proof (store/finalized-prefix data-dir s 8192)
+                                    context {:genesis (first (:blocks proof))
+                                             :chain-id chain-id
+                                             :witnesses witnesses
+                                             :quorum (:quorum s)
+                                             :hash-fn (:hash-fn s)
+                                             :verify-fn (:verify-fn s)
+                                             :max-blocks 8192}
+                                    checked (prefix/verify proof context)
+                                    body (pr-str {:proof proof
+                                                  :finalized-height (:height checked)
+                                                  :chain-id chain-id})]
+                                (if (and (= :finalized (:status checked))
+                                         (<= (.-length (.encode (js/TextEncoder.) body))
+                                             (* 8 1024 1024)))
+                                  (do (.writeHead res 200 #js {"content-type" "application/edn; charset=utf-8"
+                                                               "cache-control" "no-store"})
+                                      (.end res body))
+                                  (json-res res 503 {:ok false :error "complete prefix unavailable"})))
+                              (catch :default _
+                                (json-res res 503 {:ok false :error "complete prefix unavailable"}))))
 
                           (= p "/committed")
                           (let [ref (.get (.-searchParams url) "ref")

@@ -53,6 +53,8 @@
       :bind (env "INGA_BIND" nil)
       :tick-ms (js/parseInt (env "INGA_TICK_MS" "1000") 10)
       :view-ms (some-> (env "INGA_VIEW_MS" nil) (js/parseInt 10))
+      :archive-finalized? (= "1" (env "INGA_ARCHIVE_FINALIZED" ""))
+      :archive-http? (= "1" (env "INGA_ARCHIVE_HTTP" ""))
       :data-dir data-dir})))
 
 (-main)

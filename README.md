@@ -301,6 +301,20 @@ or multi-host network qualification. All keys in tests are newly generated.
 
 ### Finalized-prefix archive (bounded qualification implementation)
 
+For a **new chain only**, `INGA_ARCHIVE_FINALIZED=1` also saves every
+finalized block and its observed QC under `INGA_NODE_DATA/finalized-blocks/`.
+Startup refuses a missing, gapped, corrupt, or ahead-of-snapshot archive;
+turning this on after a bounded snapshot already exists therefore refuses.
+`INGA_ARCHIVE_HTTP=1` additionally enables `GET /local-finalized-prefix`.
+That route joins the complete local archive with the replica's live tail,
+selects a certified tip, and checks signatures and finality before returning
+an EDN proof. It refuses incomplete or oversized proofs. The caller must
+verify against its own trusted genesis and validator set; this endpoint is
+evidence, not writer permission. The opt-in is off for existing chains.
+The local archive is one host's custody and is not yet replicated to IPFS or
+qualified for a long outage. Its 8192-block/8 MiB response bound is a
+qualification ceiling, not a scalable state-root checkpoint.
+
 `inga-node.archive` persists a complete prefix and its tip QC as one raw
 CIDv1/sha2-256 EDN bundle on **https://kotobase.net/ipld/:cid**, using the
 existing `kotobase.blocks/client`. It verifies CID before PUT and after GET,
