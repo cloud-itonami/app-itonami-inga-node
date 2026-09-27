@@ -43,6 +43,29 @@
   (.writeHead res status #js {"content-type" "application/json"})
   (.end res (js/JSON.stringify (clj->js obj))))
 
+(defn committed-lock-conflict
+  "Return evidence when a lock contradicts an available committed block.
+
+  A bounded snapshot may omit older blocks, so absence is not called a
+  conflict. A block at the lock's height with a different hash is conclusive:
+  this witness must not sign or serve a healthy consensus state from it."
+  [s]
+  (let [lock (get-in s [:pm :locked-qc])
+        h (:inga.qc/height lock)
+        committed-height (r/committed-height s)
+        block (when (and (integer? h) (<= h committed-height))
+                (some #(when (= h (:inga.block/height %)) %)
+                      (concat (:committed s) (:chain s))))]
+    (when (and block (not= (:inga.qc/block-hash lock)
+                            ((:hash-fn s) block)))
+      {:height h
+       :committed-hash ((:hash-fn s) block)
+       :locked-hash (:inga.qc/block-hash lock)})))
+
+(defn- require-consistent-lock! [s]
+  (when-let [conflict (committed-lock-conflict s)]
+    (throw (ex-info "inga-node: lock conflicts with committed block" conflict))))
+
 (defn start!
   "Run one witness. `cfg`:
 
@@ -89,6 +112,7 @@
                          (not (integer? (:voted-below snap)))))
             (throw (ex-info "inga-node: snapshot lacks this witness's durable vote state" {})))
         state (atom (if snap (r/resume opts snap) (r/replica opts)))
+        _ (require-consistent-lock! @state)
         failed? (atom false)
         registry (atom {})
         out-node (atom nil)
@@ -135,13 +159,14 @@
 
             (advance! [f]
               (when @failed?
-                (throw (ex-info "inga-node: persistence failed; restart required" {})))
+                (throw (ex-info "inga-node: safety or persistence failed; restart required" {})))
               (let [before (count (:committed @state))
                     [s' out] (f @state)]
                 ;; No vote leaves before its safety state is durable.
                 ;; A failure poisons this running instance: the rename may
                 ;; have succeeded before directory fsync failed.
                 (try
+                  (require-consistent-lock! s')
                   (persist! s' before)
                   (catch :default e
                     (reset! failed? true)
@@ -166,7 +191,7 @@
                             p (.-pathname url)]
                         (cond
                           @failed?
-                          (json-res res 503 {:ok false :error "persistence failed; restart required"})
+                          (json-res res 503 {:ok false :error "safety or persistence failed; restart required"})
 
                           (= p "/health")
                           (let [s @state]
@@ -245,7 +270,7 @@
                                          (advance! (fn [s] [(r/submit s (js/JSON.stringify (clj->js m))) []]))
                                          (json-res res 200 {:ok true :submitted true})
                                          (catch :default _
-                                           (json-res res 503 {:ok false :error "persistence failed; restart required"}))))))))
+                                           (json-res res 503 {:ok false :error "safety or persistence failed; restart required"}))))))))
 
                           :else (json-res res 404 {:ok false :error "not found"})))))
             wss (ws/WebSocketServer. #js {:server server})
