@@ -162,6 +162,31 @@
             (let [parent (fs/openSync dir "r")]
               (try (fs/fsyncSync parent) (finally (fs/closeSync parent))))))))))
 
+(defn finalized-range
+  "Read one bounded, contiguous range from the locally verified archive.
+  Refuse malformed requests; a missing or changed archived block is a storage
+  fault, never an empty successful response. The receiving replica verifies
+  each parent QC and the target QC before adopting these bytes."
+  [data-dir from to committed hash-fn max-blocks]
+  (when (and (nat-int? from) (nat-int? to) (<= from to committed)
+             (pos-int? max-blocks) (<= (inc (- to from)) max-blocks))
+    (let [anchor (when (pos? from) (archived-entry data-dir (dec from)))
+          _ (when (and (pos? from)
+                       (not= (:hash anchor) (some-> anchor :block hash-fn)))
+              (throw (ex-info "inga-node: invalid sync archive anchor" {:height (dec from)})))
+          entries (mapv #(archived-entry data-dir %) (range from (inc to)))]
+      (loop [prev (:hash anchor) [entry & more] entries h from blocks []]
+        (if-not entry
+          (if (> h to) (vec blocks)
+              (throw (ex-info "inga-node: missing sync archive block" {:height h})))
+          (let [{:keys [block hash qc]} entry]
+            (when-not (and (= h (:inga.block/height block))
+                           (= hash (when block (hash-fn block)))
+                           (or (zero? h) (= prev (:inga.block/parent-hash block)))
+                           (or (nil? qc) (= hash (:inga.qc/block-hash qc))))
+              (throw (ex-info "inga-node: invalid sync archive block" {:height h})))
+            (recur hash more (inc h) (conj blocks block))))))))
+
 (defn finalized-prefix
   "Build a complete prefix from the immutable local archive plus the live
   certified tail. This is evidence for a separate verifier, not an authority

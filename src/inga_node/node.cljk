@@ -32,6 +32,7 @@
             [inga.replica :as r]
             [inga.consensus :as c]
             [inga.prefix :as prefix]
+            [inga.sync :as sync]
             [inga.wire :as wire]
             [inga.net.ws :as nws]
             [inga.net.server :as srv]
@@ -66,6 +67,26 @@
 (defn- require-consistent-lock! [s]
   (when-let [conflict (committed-lock-conflict s)]
     (throw (ex-info "inga-node: lock conflicts with committed block" conflict))))
+
+(defn archive-sync-response
+  "Answer a bounded sync request from finalized local custody. A restarted
+  witness retains a short in-memory tail; peers farther behind must be able to
+  fetch the earlier finalized branch from disk, including a hash-targeted fork.
+  Return nil when this archive cannot answer, so the replica may answer from
+  its live tail. Corrupt stored bytes throw and poison this witness."
+  [data-dir state {:keys [type from to target-hash]}]
+  (when (= :sync-request type)
+    (let [committed (r/committed-height state)
+          cap (:max-batch sync/default-params)
+          end (if target-hash to (min (or to -1) committed (+ (or from 0) (dec cap))))]
+      (when (and (nat-int? from) (nat-int? to) (<= from end))
+        (when-let [blocks (store/finalized-range data-dir from end committed
+                                                 (:hash-fn state) cap)]
+          (when (and (seq blocks)
+                     (or (nil? target-hash)
+                         (= target-hash ((:hash-fn state) (peek blocks)))))
+            (cond-> {:type :sync-response :blocks blocks}
+              target-hash (assoc :target-hash target-hash))))))))
 
 (defn start!
   "Run one witness. `cfg`:
@@ -181,9 +202,18 @@
                 (reset! state s')
                 (ship! out)))
 
-            (feed! [msg]
+            (feed! [msg reply!]
               (swap! counts update :recv inc)
-              (advance! #(r/on-message % msg (now))))
+              (if (and archive-finalized? (= :sync-request (:type msg)))
+                (let [answer (try (archive-sync-response data-dir @state msg)
+                                  (catch :default e
+                                    (reset! failed? true)
+                                    (throw e)))]
+                  (if answer
+                    (do (swap! counts update :sent inc)
+                        (reply! answer))
+                    (advance! #(r/on-message % msg (now)))))
+                (advance! #(r/on-message % msg (now)))))
 
             (tick! []
               (when-let [n @out-node] ((:tick! n)))
@@ -314,10 +344,15 @@
         (.on wss "connection"
              (fn [sock]
                (let [peer (str "in-" (swap! n inc))
-                     handle (srv/attach! registry peer sock
+                     handle-ref (atom nil)
+                     attached (srv/attach! registry peer sock
                                          {:add-listener (fn [s ev f] (.on s ev f))
-                                          :on-message (fn [_ m] (feed! m))})]
-                 (swap! registry update peer merge handle))))
+                                          :on-message (fn [_ m]
+                                                        (feed! m (fn [answer]
+                                                                   (when-let [send! (:send! @handle-ref)]
+                                                                     (send! answer)))))})]
+                 (reset! handle-ref attached)
+                 (swap! registry update peer merge attached))))
         (if bind
           (.listen server port bind)
           (.listen server port))
@@ -337,7 +372,9 @@
                                 :ctor (or (.-WebSocket ws) ws)
                                 :peers (vec (keys peers))
                                 :url-of (fn [p] (get peers (wire/wire-id p)))
-                                :on-message (fn [_ m] (feed! m))}))
+                                :on-message (fn [peer m]
+                                              (feed! m (fn [answer]
+                                                         ((:send! @out-node) peer answer))))}))
         ((:tick! @out-node))
 
         (let [iv (js/setInterval tick! tick-ms)]
