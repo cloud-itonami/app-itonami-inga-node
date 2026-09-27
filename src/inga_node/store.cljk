@@ -187,6 +187,38 @@
               (throw (ex-info "inga-node: invalid sync archive block" {:height h})))
             (recur hash more (inc h) (conj blocks block))))))))
 
+(defn finalized-checkpoint
+  "A fixed, certified tip for a paged reader. The committed block is read
+  from disk, then its two direct descendants and the tip QC come from one
+  replica state. A reader must verify every page from its trusted genesis
+  through :committed-height, followed by these three blocks and :tip-qc.
+  The checkpoint alone does not authenticate the earlier history."
+  [data-dir state]
+  (let [hash-fn (:hash-fn state)
+        h (:inga.block/height (peek (:committed state)))]
+    (when-not (nat-int? h)
+      (throw (ex-info "inga-node: no finalized checkpoint" {})))
+    (let [anchor (first (finalized-range data-dir h h h hash-fn 1))
+          descendants (->> (:chain state)
+                           (filter #(<= (inc h) (:inga.block/height %)))
+                           (sort-by :inga.block/height)
+                           (take 2) vec)
+          blocks (into [anchor] descendants)
+          tip (peek blocks)
+          qc (get (:qcs state) (hash-fn tip))]
+      (when-not (and (= 3 (count blocks)) qc
+                     (every? true?
+                             (for [[parent child] (partition 2 1 blocks)]
+                               (and (= (inc (:inga.block/height parent))
+                                       (:inga.block/height child))
+                                    (= (hash-fn parent) (:inga.block/parent-hash child))
+                                    (= (hash-fn parent)
+                                       (get-in child [:inga.block/justify :inga.qc/block-hash])))))
+                     (= (hash-fn tip) (:inga.qc/block-hash qc))
+                     (= (:inga.block/height tip) (:inga.qc/height qc)))
+        (throw (ex-info "inga-node: no certified finalized checkpoint" {})))
+      {:committed-height h :blocks blocks :tip-qc qc})))
+
 (defn finalized-prefix
   "Build a complete prefix from the immutable local archive plus the live
   certified tail. This is evidence for a separate verifier, not an authority
