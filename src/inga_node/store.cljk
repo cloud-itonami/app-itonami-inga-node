@@ -97,18 +97,63 @@
           (throw (ex-info "inga-node: malformed finalized archive entry" {:height height})))
         v))))
 
+(defn- fsync-dir! [dir]
+  (let [fd (fs/openSync dir "r")]
+    (try (fs/fsyncSync fd) (finally (fs/closeSync fd)))))
+
+(defn- archive-height [filename]
+  (when-let [[_ digits] (re-matches #"([0-9]+)\.edn" filename)]
+    (let [height (js/Number digits)]
+      (when (and (js/Number.isSafeInteger height)
+                 (= filename (str (pad height) ".edn")))
+        height))))
+
+(defn- quarantine-ahead!
+  "Only a contiguous suffix above the durable snapshot may be moved. The
+  process persists archive entries before the snapshot and ships votes only
+  after both, so this suffix was never part of durable voting state. Move
+  highest first: an interrupted quarantine leaves a shorter contiguous
+  suffix that the next start can handle. Keep every byte for inspection."
+  [data-dir expected ahead]
+  (let [archive (finalized-dir data-dir)
+        quarantine (fs/mkdtempSync (path/join data-dir "finalized-ahead-"))]
+    (fs/chmodSync quarantine 0700)
+    (fsync-dir! data-dir)
+    (doseq [h (reverse ahead)]
+      (fs/renameSync (finalized-path data-dir h)
+                     (path/join quarantine (str (pad h) ".edn")))
+      (fsync-dir! archive)
+      (fsync-dir! quarantine))
+    (.warn js/console
+           (str "inga-node: preserved " (count ahead)
+                " archive entries ahead of durable height " expected
+                " in " quarantine))
+    quarantine))
+
 (defn verify-finalized-archive!
   "Fail closed when an opted-in witness lacks a contiguous archive from genesis
-  through its snapshot's committed block. A fresh witness may start empty."
+  through its snapshot's committed block. A fresh witness may start empty.
+  A bounded, contiguous suffix above a PRESENT durable snapshot is preserved
+  in a quarantine directory after the committed prefix is verified. No file
+  at or below the snapshot height is repaired or discarded."
   [data-dir snap hash-fn]
   (let [dir (finalized-dir data-dir)
         expected (if (seq (:committed snap))
                    (:inga.block/height (peek (:committed snap))) -1)
-        files (if (fs/existsSync dir) (vec (fs/readdirSync dir)) [])]
+        files (if (fs/existsSync dir) (vec (fs/readdirSync dir)) [])
+        expected-files (set (map #(str (pad %) ".edn") (range (inc expected))))
+        ahead-files (remove expected-files files)
+        parsed-ahead (mapv archive-height ahead-files)
+        ahead (when (every? some? parsed-ahead) (sort parsed-ahead))]
     (when (and snap (not (vector? (:committed snap))))
       (throw (ex-info "inga-node: snapshot has no committed archive anchor" {})))
-    (when-not (= (set files)
-                 (set (map #(str (pad %) ".edn") (range (inc expected)))))
+    (when-not (and (= (count files) (+ (count expected-files) (count ahead)))
+                   (every? (set files) expected-files)
+                   (or (and (empty? ahead-files) (empty? ahead))
+                       (and snap (<= (count ahead) 256)
+                            (= (count ahead-files) (count ahead))
+                            (= ahead (range (inc expected)
+                                            (+ (inc expected) (count ahead)))))))
       (throw (ex-info "inga-node: finalized archive missing or ahead" {:expected expected})))
     (loop [h 0 previous nil]
       (when (<= h expected)
@@ -123,6 +168,10 @@
       (when-not (= (hash-fn (peek (:committed snap)))
                    (:hash (archived-entry data-dir expected)))
         (throw (ex-info "inga-node: finalized archive contradicts snapshot" {}))))
+    (when (seq ahead)
+      (quarantine-ahead! data-dir expected ahead)
+      (when-not (= expected-files (set (fs/readdirSync dir)))
+        (throw (ex-info "inga-node: finalized archive quarantine incomplete" {}))))
     expected))
 
 (defn append-finalized!

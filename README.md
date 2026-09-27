@@ -303,8 +303,17 @@ or multi-host network qualification. All keys in tests are newly generated.
 
 For a **new chain only**, `INGA_ARCHIVE_FINALIZED=1` also saves every
 finalized block and its observed QC under `INGA_NODE_DATA/finalized-blocks/`.
-Startup refuses a missing, gapped, corrupt, or ahead-of-snapshot archive;
-turning this on after a bounded snapshot already exists therefore refuses.
+Startup refuses a missing, gapped, or corrupt committed archive; turning this
+on after a bounded snapshot already exists therefore refuses.
+If a restart interrupts an append after the last durable snapshot, startup
+first verifies every archived block through that snapshot. It then moves only
+a contiguous suffix of at most 256 later files, highest first, to a fsynced
+`finalized-ahead-*` directory beside the archive. It preserves their bytes,
+including a possible zero-byte final file, and resumes from the durable
+snapshot. Missing or changed blocks at or below the snapshot, a gap in the
+suffix, an unexpected filename, or a missing snapshot still refuses startup.
+This relies on the existing order: archive and snapshot durability complete
+before any vote or output is shipped, with one process owning the witness key.
 `INGA_ARCHIVE_HTTP=1` additionally enables `GET /local-finalized-prefix`.
 That route joins the complete local archive with the replica's live tail,
 selects a certified tip, and checks signatures and finality before returning
