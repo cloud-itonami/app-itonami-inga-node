@@ -232,3 +232,38 @@
                      (is (= before (fs/readFileSync (store/snapshot-path d) "utf8")))))
             (.catch (fn [e] (is false (str e))))
             (.finally (fn [] ((:stop! n)) (done))))))))
+
+(deftest a-lock-conflicting-with-a-committed-block-fails-closed
+  (let [d (tmp) sent (atom []) n (boot-captured d sent)
+        original @(:state n)
+        committed (r/tip original)
+        bad (-> original
+                (assoc :committed [committed])
+                (assoc-in [:pm :locked-qc]
+                          {:inga.qc/height (:inga.block/height committed)
+                           :inga.qc/block-hash "conflicting-certified-fork"}))]
+    (try
+      (store/write-snapshot! d (r/snapshot original))
+      (let [before (fs/readFileSync (store/snapshot-path d) "utf8")]
+      (is (= (:inga.block/height committed)
+             (:height (node/committed-lock-conflict bad))))
+      (is (= (seams/hash-fn committed)
+             (:committed-hash (node/committed-lock-conflict bad))))
+      (is (nil? (node/committed-lock-conflict original)))
+      (let [error (try ((:advance! n) (fn [_] [bad [{:to :all :msg {:type :vote}}]]))
+                       nil
+                       (catch :default e e))]
+        (is (some? error))
+        (is (str/includes? (.-message error) "lock conflicts with committed block")))
+      (is (= before (fs/readFileSync (store/snapshot-path d) "utf8"))
+          "the conflicting state was not made durable")
+      (is (empty? @sent) "no vote escaped the safety refusal")
+      (is (thrown? js/Error ((:advance! n) (fn [s] [s []])))
+          "a poisoned process cannot resume signing"))
+      (finally ((:stop! n))))
+    (store/write-snapshot! d (r/snapshot bad))
+    (let [error (try (boot-captured d (atom []) (:test-seed n))
+                     nil
+                     (catch :default e e))]
+      (is (some? error) "a restart must refuse the same conflicting durable state")
+      (is (str/includes? (.-message error) "lock conflicts with committed block")))))
