@@ -84,7 +84,7 @@
 ;; A bounded replica snapshot cannot prove that an earlier record did not win
 ;; a ref. Keep every finalized block when a fresh chain explicitly opts in.
 ;; This is local custody for a future complete-prefix verifier, not authority
-;; by itself: readers must still check the chain and every signed certificate.
+;; by itself: readers must check the chain and a signed certificate for its tip.
 (defn- finalized-dir [data-dir] (path/join data-dir "finalized-blocks"))
 (defn- finalized-path [data-dir height]
   (path/join (finalized-dir data-dir) (str (pad height) ".edn")))
@@ -116,7 +116,7 @@
               actual (when block (hash-fn block))]
           (when-not (and (= h (:inga.block/height block)) (= hash actual)
                          (or (zero? h) (= previous (:inga.block/parent-hash block)))
-                         (or (zero? h) (= hash (:inga.qc/block-hash qc))))
+                         (or (nil? qc) (= hash (:inga.qc/block-hash qc))))
             (throw (ex-info "inga-node: invalid finalized archive chain" {:height h})))
           (recur (inc h) hash))))
     (when (nat-int? expected)
@@ -126,9 +126,12 @@
     expected))
 
 (defn append-finalized!
-  "Append newly committed blocks with their certificates, in height order.
-  Missing parent, certificate, or a conflicting byte refuses before snapshot
-  durability. A partial archive after a crash is detected on restart."
+  "Append newly committed blocks with any locally available certificates, in
+  height order. A replica can learn a finalized block by sync before receiving
+  that block's own QC; the complete-prefix verifier needs a certified tip, not
+  a separate QC for every committed block. Missing parent, mismatched QC, or
+  conflicting bytes refuses before snapshot durability. A partial archive
+  after a crash is detected on restart."
   [data-dir blocks qcs hash-fn]
   (let [dir (finalized-dir data-dir)]
     (ensure-dir! dir)
@@ -145,8 +148,8 @@
                       (= (:hash prev) (:inga.block/parent-hash block)))
           (throw (ex-info "inga-node: finalized archive missing parent"
                           {:height h})))
-        (when-not (or (zero? h) (= hash (:inga.qc/block-hash qc)))
-          (throw (ex-info "inga-node: finalized archive missing certificate"
+        (when-not (or (nil? qc) (= hash (:inga.qc/block-hash qc)))
+          (throw (ex-info "inga-node: finalized archive mismatched certificate"
                           {:height h})))
         (if (fs/existsSync f)
           (when-not (= entry (archived-entry data-dir h))
