@@ -53,12 +53,13 @@
     :seed-hex   this witness's private seed
     :chain-id   string
     :port       int
+    :bind       optional local interface address (for example a tailnet IP)
     :tick-ms    int
     :data-dir   string
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
-  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port tick-ms view-ms data-dir prefix-service]}]
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service]}]
   (let [opts {:witness witness
               :witnesses witnesses
               :quorum (c/quorum-size (count witnesses))
@@ -257,7 +258,9 @@
                                          {:add-listener (fn [s ev f] (.on s ev f))
                                           :on-message (fn [_ m] (feed! m))})]
                  (swap! registry update peer merge handle))))
-        (.listen server port)
+        (if bind
+          (.listen server port bind)
+          (.listen server port))
 
         (reset! out-node
                 (nws/make-node {;; The `ws` package, not the platform global.
@@ -278,7 +281,7 @@
         ((:tick! @out-node))
 
         (let [iv (js/setInterval tick! tick-ms)]
-          (js/console.log (str "inga-node " witness " listening on :" port
+          (js/console.log (str "inga-node " witness " listening on " (or bind "*") ":" port
                                " peers=" (str/join "," (keys peers))
                                " tick=" tick-ms "ms data=" data-dir))
           {:state state
