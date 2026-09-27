@@ -81,6 +81,117 @@
   (let [s (str n)]
     (str (str/join "" (repeat (max 0 (- 12 (count s))) "0")) s)))
 
+;; A bounded replica snapshot cannot prove that an earlier record did not win
+;; a ref. Keep every finalized block when a fresh chain explicitly opts in.
+;; This is local custody for a future complete-prefix verifier, not authority
+;; by itself: readers must still check the chain and every signed certificate.
+(defn- finalized-dir [data-dir] (path/join data-dir "finalized-blocks"))
+(defn- finalized-path [data-dir height]
+  (path/join (finalized-dir data-dir) (str (pad height) ".edn")))
+
+(defn- archived-entry [data-dir height]
+  (let [f (finalized-path data-dir height)]
+    (when (fs/existsSync f)
+      (let [v (edn/read-string (fs/readFileSync f "utf8"))]
+        (when-not (map? v)
+          (throw (ex-info "inga-node: malformed finalized archive entry" {:height height})))
+        v))))
+
+(defn verify-finalized-archive!
+  "Fail closed when an opted-in witness lacks a contiguous archive from genesis
+  through its snapshot's committed block. A fresh witness may start empty."
+  [data-dir snap hash-fn]
+  (let [dir (finalized-dir data-dir)
+        expected (if (seq (:committed snap))
+                   (:inga.block/height (peek (:committed snap))) -1)
+        files (if (fs/existsSync dir) (vec (fs/readdirSync dir)) [])]
+    (when (and snap (not (vector? (:committed snap))))
+      (throw (ex-info "inga-node: snapshot has no committed archive anchor" {})))
+    (when-not (= (set files)
+                 (set (map #(str (pad %) ".edn") (range (inc expected)))))
+      (throw (ex-info "inga-node: finalized archive missing or ahead" {:expected expected})))
+    (loop [h 0 previous nil]
+      (when (<= h expected)
+        (let [{:keys [block hash qc]} (archived-entry data-dir h)
+              actual (when block (hash-fn block))]
+          (when-not (and (= h (:inga.block/height block)) (= hash actual)
+                         (or (zero? h) (= previous (:inga.block/parent-hash block)))
+                         (or (zero? h) (= hash (:inga.qc/block-hash qc))))
+            (throw (ex-info "inga-node: invalid finalized archive chain" {:height h})))
+          (recur (inc h) hash))))
+    (when (nat-int? expected)
+      (when-not (= (hash-fn (peek (:committed snap)))
+                   (:hash (archived-entry data-dir expected)))
+        (throw (ex-info "inga-node: finalized archive contradicts snapshot" {}))))
+    expected))
+
+(defn append-finalized!
+  "Append newly committed blocks with their certificates, in height order.
+  Missing parent, certificate, or a conflicting byte refuses before snapshot
+  durability. A partial archive after a crash is detected on restart."
+  [data-dir blocks qcs hash-fn]
+  (let [dir (finalized-dir data-dir)]
+    (ensure-dir! dir)
+    (doseq [block blocks]
+      (let [h (:inga.block/height block)
+            _ (when-not (nat-int? h)
+                (throw (ex-info "inga-node: finalized archive invalid height" {:height h})))
+            hash (hash-fn block)
+            qc (get qcs hash)
+            prev (when (pos? h) (archived-entry data-dir (dec h)))
+            entry {:block block :hash hash :qc qc}
+            f (finalized-path data-dir h)]
+        (when-not (or (zero? h)
+                      (= (:hash prev) (:inga.block/parent-hash block)))
+          (throw (ex-info "inga-node: finalized archive missing parent"
+                          {:height h})))
+        (when-not (or (zero? h) (= hash (:inga.qc/block-hash qc)))
+          (throw (ex-info "inga-node: finalized archive missing certificate"
+                          {:height h})))
+        (if (fs/existsSync f)
+          (when-not (= entry (archived-entry data-dir h))
+            (throw (ex-info "inga-node: finalized archive conflict" {:height h})))
+          (let [fd (fs/openSync f "wx" 0600)]
+            (try
+              (fs/writeFileSync fd (pr-str entry) "utf8")
+              (fs/fsyncSync fd)
+              (finally (fs/closeSync fd)))
+            (let [parent (fs/openSync dir "r")]
+              (try (fs/fsyncSync parent) (finally (fs/closeSync parent))))))))))
+
+(defn finalized-prefix
+  "Build a complete prefix from the immutable local archive plus the live
+  certified tail. This is evidence for a separate verifier, not an authority
+  decision. A missing file, fork, or absent tip certificate refuses."
+  [data-dir state max-blocks]
+  (let [hash-fn (:hash-fn state)
+        committed (:inga.block/height (peek (:committed state)))]
+    (when-not (and (pos-int? max-blocks) (nat-int? committed)
+                   (< committed max-blocks))
+      (throw (ex-info "inga-node: finalized prefix unavailable or too long" {})))
+    (verify-finalized-archive! data-dir {:committed (vec (take-last 1 (:committed state)))} hash-fn)
+    (let [archived (mapv #(-> (archived-entry data-dir %) :block)
+                         (range (inc committed)))
+          tail (->> (:chain state)
+                    (filter #(< committed (:inga.block/height %)))
+                    (sort-by :inga.block/height) vec)
+          blocks (into archived tail)
+          _ (when (> (count blocks) max-blocks)
+              (throw (ex-info "inga-node: finalized prefix too long" {})))
+          _ (doseq [[parent child] (partition 2 1 blocks)]
+              (when-not (and (= (inc (:inga.block/height parent))
+                                (:inga.block/height child))
+                             (= (hash-fn parent) (:inga.block/parent-hash child)))
+                (throw (ex-info "inga-node: finalized prefix tail mismatch" {}))))
+          certified (last (keep-indexed
+                           (fn [i block]
+                             (when-let [qc (get (:qcs state) (hash-fn block))]
+                               [i qc])) blocks))]
+      (when-not certified
+        (throw (ex-info "inga-node: finalized prefix has no certified tip" {})))
+      (let [[i qc] certified]
+        {:blocks (subvec blocks 0 (inc i)) :tip-qc qc}))))
+
 (defn decode-proposal
   "A proposal string back into a head record, or nil.
 

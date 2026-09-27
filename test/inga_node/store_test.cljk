@@ -43,6 +43,45 @@
     (is (= #{"snapshot.edn"} (set (fs/readdirSync d)))
         "a rename that left its temp file would grow the data dir forever")))
 
+(deftest finalized-archive-starts-at-genesis-and-survives-restart
+  (let [d (tmp)
+        genesis {:inga.block/height 0 :inga.block/parent-hash nil :inga.block/proposals []}
+        b1 {:inga.block/height 1 :inga.block/parent-hash (seams/hash-fn genesis)
+            :inga.block/proposals []}
+        h1 (seams/hash-fn b1)
+        qc {:inga.qc/block-hash h1 :inga.qc/height 1 :inga.qc/witnesses #{"w1" "w2" "w3"}}]
+    (store/append-finalized! d [genesis b1] {h1 qc} seams/hash-fn)
+    (is (= 1 (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn)))
+    (is (= 2 (count (fs/readdirSync (path/join d "finalized-blocks")))))
+    (let [b2 {:inga.block/height 2 :inga.block/parent-hash h1 :inga.block/proposals []}
+          b3 {:inga.block/height 3 :inga.block/parent-hash (seams/hash-fn b2)
+              :inga.block/proposals []}
+          h3 (seams/hash-fn b3)
+          state {:committed [b1] :chain [genesis b1 b2 b3]
+                 :qcs {h3 {:inga.qc/block-hash h3}} :hash-fn seams/hash-fn}]
+      (is (= [genesis b1 b2 b3]
+             (:blocks (store/finalized-prefix d state 8))))
+      (is (thrown? js/Error (store/finalized-prefix d state 2))
+          "a bounded response cannot silently omit genesis"))
+    (is (thrown? js/Error
+          (store/append-finalized! d [{:inga.block/height 2
+                                       :inga.block/parent-hash "wrong-parent"}]
+                                   {} seams/hash-fn))
+        "a gap or fork cannot extend the archive")
+    (is (= 2 (count (fs/readdirSync (path/join d "finalized-blocks")))))
+    (fs/writeFileSync (path/join d "finalized-blocks" "000000000001.edn") "{:truncated true}" "utf8")
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn))
+        "a corrupt archived block cannot become a healthy restart")))
+
+(deftest finalized-archive-refuses-a-late-opt-in
+  (let [d (tmp)
+        b {:inga.block/height 7 :inga.block/proposals []}]
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b]} seams/hash-fn))
+        "a bounded old snapshot cannot be called a complete prefix")
+    (is (= -1 (store/verify-finalized-archive! d {:committed []} seams/hash-fn)))))
+
 ;; ── the committed log ───────────────────────────────────────────────────────
 
 (deftest one-record-is-one-file-however-many-leaders-commit-it

@@ -58,6 +58,22 @@
 
 (defn- once [done] (let [f (atom false)] (fn [] (when-not @f (reset! f true) (done)))))
 
+(deftest enabling-a-complete-archive-after-a-bounded-snapshot-refuses
+  (let [d (tmp)
+        seed (ident/ensure-seed! d)
+        opts {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
+              :quorum 3 :chain-id "inga-node-test" :hash-fn seams/hash-fn
+              :sign-fn (seams/sign-fn seed) :verify-fn (seams/verify-fn {})}
+        snap (assoc (r/snapshot (r/replica opts))
+                    :committed [{:inga.block/height 7 :inga.block/proposals []}])]
+    (store/write-snapshot! d snap)
+    (is (thrown? js/Error
+          (node/start! {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
+                        :peers {} :pubkeys {} :seed-hex seed
+                        :chain-id "inga-node-test" :port 0 :tick-ms 100000
+                        :data-dir d :archive-finalized? true}))
+        "turning on the archive after history was pruned cannot fabricate genesis")))
+
 (deftest a-restart-keeps-the-submitted-work
   (testing "the property that replaces the Durable Object: it comes back"
     (async raw-done

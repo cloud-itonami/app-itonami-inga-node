@@ -1,0 +1,98 @@
+(ns inga-node.finalized-prefix-test
+  (:require [kotoba.test :refer [deftest is async]]
+            [kotoba.lang.edn :as edn]
+            [inga.attest :as att]
+            [inga.consensus :as c]
+            [inga.head :as head]
+            [inga.prefix :as prefix]
+            [inga.replica :as r]
+            [inga.reservation :as reservation]
+            [inga-node.node :as node]
+            [inga-node.seams :as seams]
+            [inga-node.store :as store]
+            ["node:crypto" :as crypto]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]))
+
+(def witnesses ["w1" "w2" "w3" "w4"])
+(def chain-id "inga-local-prefix-test")
+
+(defn- fixture []
+  (let [seeds (into {} (for [w witnesses]
+                         [w (.toString (crypto/randomBytes 32) "hex")]))
+        pubkeys (into {} (for [[w seed] seeds]
+                           [w (seams/public-hex seed)]))
+        opts {:witness "w1" :witnesses witnesses :quorum 3
+              :chain-id chain-id :hash-fn seams/hash-fn
+              :sign-fn (seams/sign-fn (seeds "w1"))
+              :verify-fn (seams/verify-fn pubkeys)}
+        genesis (first (:chain (r/replica opts)))
+        record (head/head-record {:ref-name "qualification/lease" :seq 0
+                                  :prev nil :cid "cid-holder-intent" :height nil})
+        certify (fn [block]
+                  (let [h (:inga.block/height block)
+                        votes (mapv (fn [w]
+                                      (att/sign-vote
+                                       (c/make-vote w (seams/hash-fn block) h)
+                                       chain-id h (seams/sign-fn (seeds w))))
+                                    (take 3 witnesses))]
+                    (att/certify (c/qc votes 4 h) votes)))
+        blocks (reduce (fn [bs proposals]
+                         (let [parent (peek bs) h (inc (:inga.block/height parent))]
+                           (conj bs (assoc (c/make-block
+                                            {:height h :parent-hash (seams/hash-fn parent)
+                                             :proposals proposals
+                                             :proposer (c/led-by witnesses h) :ts h
+                                             :justify (certify parent)})
+                                           :inga.block/round h))))
+                       [genesis]
+                       [[(js/JSON.stringify (clj->js record))] [] []])
+        qcs (into {} (for [b blocks] [(seams/hash-fn b) (certify b)]))
+        snapshot (-> (r/snapshot (r/replica opts))
+                     (assoc :chain blocks
+                            :by-hash (into {} (for [b blocks] [(seams/hash-fn b) b]))
+                            :qcs qcs :committed [(nth blocks 1)]))]
+    {:opts opts :pubkeys pubkeys :seed (seeds "w1") :blocks blocks
+     :record record :qcs qcs :snapshot snapshot}))
+
+(deftest local-prefix-route-proves-a-first-winner
+  (async done
+    (let [d (fs/mkdtempSync (path/join (os/tmpdir) "inga-prefix-http-"))
+          port (+ 25000 (mod (.-pid js/process) 2000))
+          {:keys [opts pubkeys seed blocks record qcs snapshot]} (fixture)
+          context {:genesis (first blocks) :chain-id chain-id :witnesses witnesses
+                   :quorum 3 :hash-fn seams/hash-fn :verify-fn (seams/verify-fn pubkeys)
+                   :max-blocks 8192 :decode-proposal store/decode-proposal}]
+      (store/append-finalized! d (subvec blocks 0 2) qcs seams/hash-fn)
+      (store/write-snapshot! d snapshot)
+      (let [n (node/start! (merge opts {:seed-hex seed :pubkeys pubkeys
+                                        :port port :bind "127.0.0.1"
+                                        :tick-ms 100000 :data-dir d
+                                        :archive-finalized? true :archive-http? true}))]
+        (-> (js/fetch (str "http://127.0.0.1:" port "/local-finalized-prefix"))
+            (.then (fn [response]
+                     (is (= 200 (.-status response)))
+                     (.text response)))
+            (.then (fn [body]
+                     (let [proof (:proof (edn/read-string body))]
+                       (is (= :finalized (:status (prefix/verify proof context))))
+                       (is (= :reserved (:status
+                                         (reservation/verify-acquisition record proof context))))
+                       (is (= :rejected (:status
+                                         (reservation/verify-acquisition
+                                          (assoc record "cid" "other") proof context))))
+                       (fs/writeFileSync
+                        (path/join d "finalized-blocks" "000000000001.edn")
+                        "{:truncated true}" "utf8")
+                       (js/fetch (str "http://127.0.0.1:" port
+                                      "/local-finalized-prefix")))))
+            (.then (fn [response]
+                     (is (= 503 (.-status response))
+                         "a damaged archive cannot serve a proof")
+                     ((:stop! n))
+                     (done)))
+            (.catch (fn [e]
+                      (is false (str "prefix route failed: " (or (.-message e) e)))
+                      ((:stop! n))
+                      (done))))))))
