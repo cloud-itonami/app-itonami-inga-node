@@ -17,10 +17,10 @@
         io.github.kotoba-lang/text {:git/sha "41718d36ba2f1d86e6c5a11524ee9f904cbaf9a3"}
        io.github.kotoba-lang/inga
         {:git/url "https://github.com/kotoba-lang/inga.git"
-         ;; Advanced for `inga.commitment`: `inga_node.ref` composes it, and a
-         ;; pin behind the namespace it requires is a dependency that resolves
-         ;; on one machine and not the next.
-         :git/sha "817bb2b5b9f3e3be282abbfb7f01deb491c36c24"}
+         ;; Archive-backed sync requires certified ahead-branch requests from
+         ;; this floor. A node deployed with an older inga cannot recover a
+         ;; divergent uncommitted suffix after restart.
+         :git/sha "9961fe479f513c59bef9671da68197f9df053cce"}
        io.github.kotoba-lang/kotobase-client
         {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
          :git/sha "c7882c58efe2fe558fc2b512678c2ab56088fcc0"}
