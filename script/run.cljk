@@ -50,6 +50,7 @@
       :seed-hex seed-hex
       :chain-id (env "INGA_CHAIN_ID" "inga-fleet-1")
       :port (js/parseInt (env "INGA_PORT" "19301") 10)
+      :bind (env "INGA_BIND" nil)
       :tick-ms (js/parseInt (env "INGA_TICK_MS" "1000") 10)
       :view-ms (some-> (env "INGA_VIEW_MS" nil) (js/parseInt 10))
       :data-dir data-dir})))

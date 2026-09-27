@@ -49,6 +49,10 @@ INGA_PORT=19401 INGA_TICK_MS=1000 INGA_NODE_DATA=~/.inga/w1 \
 kbb --backend sci --classpath "src:../inga/src" script/run.cljk
 ```
 
+Set `INGA_BIND` to a local tailnet address when the witness host also has a
+public network interface. The HTTP and WebSocket listener then use that
+address only. Omit it to preserve the existing all-interface behavior.
+
 `INGA_PRINT_PUBKEY=1` mints the seed if absent, prints `w1=<hex>` and exits —
 the bootstrap step, run once per node, whose output is public.
 
