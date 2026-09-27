@@ -315,6 +315,33 @@ The local archive is one host's custody and is not yet replicated to IPFS or
 qualified for a long outage. Its 8192-block/8 MiB response bound is a
 qualification ceiling, not a scalable state-root checkpoint.
 
+The same opt-in also serves bounded, height-addressed evidence:
+
+- `GET /local-finalized-checkpoint` returns EDN with `:chain-id`, a fixed
+  `:committed-height`, the archived block at that height, its two direct
+  descendants, and the last block's QC. It returns 503 until that certified
+  three-block window is available.
+- `GET /local-finalized-range?from=0&limit=128` returns at most 128 archived
+  blocks as EDN with `:chain-id`, `:from`, and `:to`. A reader requests every
+  height from zero through the checkpoint's `:committed-height`, in order.
+  Invalid requests return 400, heights beyond the fixed checkpoint return
+  416, and damaged custody returns 503. Each response is limited to 8 MiB.
+
+A reader starts with its own trusted empty genesis, ordered validator keys,
+quorum, and chain ID. It verifies each page's heights, hashes, direct parent
+links, proposer order, and parent QCs using `inga.sync/validate-segment`,
+retaining the last block as the next page's anchor. It must reject a gap,
+overlap, changed checkpoint anchor, wrong chain ID, or an invalid signature.
+After the page ending at the checkpoint height, it verifies the checkpoint's
+three blocks agree with that last archived block, validates its two descendants
+and signed tip QC, then applies the three-chain rule. The checkpoint response
+alone is insufficient: the server's claimed height and hash are untrusted.
+Pages allow reading beyond the old 8192-block *response* limit without an
+unbounded HTTP body. This release provides the producer endpoints; it does not
+yet include a streaming external verifier or a compact trusted state root.
+Reading and verifying from genesis remains O(history). The local archive is
+still one host's custody until replicated and independently read back.
+
 `inga-node.archive` persists a complete prefix and its tip QC as one raw
 CIDv1/sha2-256 EDN bundle on **https://kotobase.net/ipld/:cid**, using the
 existing `kotobase.blocks/client`. It verifies CID before PUT and after GET,

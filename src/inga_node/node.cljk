@@ -45,6 +45,19 @@
   (.writeHead res status #js {"content-type" "application/json"})
   (.end res (js/JSON.stringify (clj->js obj))))
 
+(defn- query-nat [value]
+  (when (and (string? value) (re-matches #"(0|[1-9][0-9]*)" value))
+    (let [n (js/Number value)]
+      (when (js/Number.isSafeInteger n) n))))
+
+(defn- edn-res [res value]
+  (let [body (pr-str value)]
+    (if (<= (.-length (.encode (js/TextEncoder.) body)) (* 8 1024 1024))
+      (do (.writeHead res 200 #js {"content-type" "application/edn; charset=utf-8"
+                                   "cache-control" "no-store"})
+          (.end res body))
+      (json-res res 503 {:ok false :error "evidence page exceeds byte limit"}))))
+
 (defn committed-lock-conflict
   "Return evidence when a lock contradicts an available committed block.
 
@@ -102,7 +115,7 @@
     :tick-ms    int
     :data-dir   string
     :archive-finalized?  retain every finalized block from a fresh genesis
-    :archive-http?       expose an opt-in complete-prefix evidence endpoint
+    :archive-http?       expose opt-in bounded archive evidence endpoints
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
@@ -286,6 +299,40 @@
                                          (.writeHead res status (clj->js headers))
                                          (.end res body)))
                                 (.catch (fn [_] (json-res res 503 {:ok false :error "prefix archive unavailable"})))))
+
+                          (= p "/local-finalized-range")
+                          (if-not (and archive-finalized? archive-http?
+                                       (= "GET" (.-method req)))
+                            (json-res res 404 {:ok false :error "not found"})
+                            (let [from (query-nat (.get (.-searchParams url) "from"))
+                                  limit (query-nat (.get (.-searchParams url) "limit"))]
+                              (if-not (and from limit (<= 1 limit 128))
+                                (json-res res 400 {:ok false :error "invalid bounded range"})
+                                (try
+                                  (let [s @state
+                                        committed (r/committed-height s)
+                                        to (+ from (dec limit))]
+                                    (if (and (<= to 9007199254740991)
+                                             (<= to committed))
+                                      (if-let [blocks (store/finalized-range
+                                                       data-dir from to committed
+                                                       (:hash-fn s) 128)]
+                                        (edn-res res {:chain-id chain-id :from from :to to
+                                                      :blocks blocks})
+                                        (json-res res 416 {:ok false :error "range unavailable"}))
+                                      (json-res res 416 {:ok false :error "range unavailable"})))
+                                  (catch :default _
+                                    (json-res res 503 {:ok false :error "archive range unavailable"}))))))
+
+                          (= p "/local-finalized-checkpoint")
+                          (if-not (and archive-finalized? archive-http?
+                                       (= "GET" (.-method req)))
+                            (json-res res 404 {:ok false :error "not found"})
+                            (try
+                              (edn-res res (assoc (store/finalized-checkpoint data-dir @state)
+                                                  :chain-id chain-id))
+                              (catch :default _
+                                (json-res res 503 {:ok false :error "certified checkpoint unavailable"}))))
 
                           (= p "/local-finalized-prefix")
                           (if-not (and archive-finalized? archive-http?

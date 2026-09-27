@@ -96,3 +96,56 @@
                       (is false (str "prefix route failed: " (or (.-message e) e)))
                       ((:stop! n))
                       (done))))))))
+
+(deftest bounded-pages-and-checkpoint-reconstruct-a-certified-prefix
+  (async done
+    (let [d (fs/mkdtempSync (path/join (os/tmpdir) "inga-pages-http-"))
+          port (+ 28000 (mod (.-pid js/process) 2000))
+          {:keys [opts pubkeys seed blocks qcs snapshot]} (fixture)
+          base (str "http://127.0.0.1:" port)
+          context {:genesis (first blocks) :chain-id chain-id :witnesses witnesses
+                   :quorum 3 :hash-fn seams/hash-fn :verify-fn (seams/verify-fn pubkeys)
+                   :max-blocks 8}]
+      (store/append-finalized! d (subvec blocks 0 2) qcs seams/hash-fn)
+      (store/write-snapshot! d snapshot)
+      (let [n (node/start! (merge opts {:seed-hex seed :pubkeys pubkeys
+                                        :port port :bind "127.0.0.1"
+                                        :tick-ms 100000 :data-dir d
+                                        :archive-finalized? true :archive-http? true}))]
+        (-> (js/fetch (str base "/local-finalized-range?from=0&limit=2"))
+            (.then (fn [response]
+                     (is (= 200 (.-status response)))
+                     (.text response)))
+            (.then (fn [body]
+                     (let [page (edn/read-string body)]
+                       (is (= [0 1] [(:from page) (:to page)]))
+                       (is (= (subvec blocks 0 2) (:blocks page)))
+                       (-> (js/fetch (str base "/local-finalized-checkpoint"))
+                           (.then (fn [response]
+                                    (is (= 200 (.-status response)))
+                                    (.text response)))
+                           (.then (fn [checkpoint-body]
+                                    (let [checkpoint (edn/read-string checkpoint-body)
+                                          proof {:blocks (into (:blocks page)
+                                                               (rest (:blocks checkpoint)))
+                                                 :tip-qc (:tip-qc checkpoint)}]
+                                      (is (= 1 (:committed-height checkpoint)))
+                                      (is (= :finalized (:status (prefix/verify proof context)))))
+                                    (js/fetch (str base "/local-finalized-range?from=0&limit=129"))))))))
+            (.then (fn [response]
+                     (is (= 400 (.-status response)))
+                     (js/fetch (str base "/local-finalized-range?from=2&limit=1"))))
+            (.then (fn [response]
+                     (is (= 416 (.-status response)))
+                     (fs/writeFileSync
+                      (path/join d "finalized-blocks" "000000000001.edn")
+                      "{:truncated true}" "utf8")
+                     (js/fetch (str base "/local-finalized-range?from=0&limit=2"))))
+            (.then (fn [response]
+                     (is (= 503 (.-status response)))
+                     ((:stop! n))
+                     (done)))
+            (.catch (fn [e]
+                      (is false (str "paged evidence route failed: " (or (.-message e) e)))
+                      ((:stop! n))
+                      (done))))))))
