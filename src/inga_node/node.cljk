@@ -139,6 +139,8 @@
             (throw (ex-info "inga-node: snapshot lacks this witness's durable vote state" {})))
         state (atom (if snap (r/resume opts snap) (r/replica opts)))
         _ (require-consistent-lock! @state)
+        durable-snapshot (atom snap)
+        snapshot-writes (atom 0)
         failed? (atom false)
         registry (atom {})
         out-node (atom nil)
@@ -163,7 +165,19 @@
                   (store/sink-blocks! data-dir
                                       (take-last r/resume-tail (:committed s))
                                       (:qcs s) (:hash-fn s)))
-                (store/write-snapshot! data-dir (r/snapshot s))))
+                ;; The transport sends many votes and repeated sync requests
+                ;; that change only in-memory working sets. The old path
+                ;; fsynced the same bounded snapshot for every one of them:
+                ;; xavier received 38k messages and wrote about 1 GB while
+                ;; the HTTP event loop intermittently stopped answering.
+                ;; A vote, lock, QC, commit, pending record, or pacemaker
+                ;; change is in this snapshot and still reaches disk BEFORE
+                ;; ship! can release any output.
+                (let [next-snapshot (r/snapshot s)]
+                  (when (not= @durable-snapshot next-snapshot)
+                    (store/write-snapshot! data-dir next-snapshot)
+                    (reset! durable-snapshot next-snapshot)
+                    (swap! snapshot-writes inc)))))
 
             (ship! [outbox]
               ;; BROADCAST, ignoring `:to`, because that is what `inga`'s own
@@ -259,6 +273,7 @@
                                        :peers-out (when-let [n @out-node] (count ((:live n))))
                                        :peers-in (srv/peer-count registry)
                                        :records (store/count-records data-dir)
+                                       :snapshot-writes @snapshot-writes
                                        :counts @counts}))
 
                           (= p "/finalized-prefix")

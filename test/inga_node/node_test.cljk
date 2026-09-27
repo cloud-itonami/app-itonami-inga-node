@@ -202,6 +202,28 @@
       (is (empty? @sent))
       (finally ((:stop! n))))))
 
+(deftest unchanged-working-state-skips-fsync-but-vote-watermark-survives-restart
+  (let [d (tmp) sent (atom []) n (boot-captured d sent)
+        write! store/write-snapshot! writes (atom 0)]
+    (try
+      ((:advance! n) #(r/start % 0))
+      (with-redefs [store/write-snapshot! (fn [dir snapshot]
+                                           (swap! writes inc)
+                                           (write! dir snapshot))]
+        (dotimes [_ 200]
+          ((:advance! n) (fn [s] [s []])))
+        (is (= 0 @writes) "unchanged network work must not fsync a duplicate snapshot")
+        ((:advance! n) (fn [s] [(r/with-voted-view s 9) []]))
+        (is (= 1 @writes) "a signing watermark must still be durable")
+        ((:advance! n) (fn [s] [(r/with-voted-view s 9) []]))
+        (is (= 1 @writes) "repeating the same watermark is not another write"))
+      (is (= 9 (:voted-view (store/read-snapshot d))))
+      (finally ((:stop! n))))
+    (let [resumed (boot-captured d (atom []) (:test-seed n))]
+      (try
+        (is (= 9 (r/voted-view @(:state resumed))))
+        (finally ((:stop! resumed)))))))
+
 (deftest persisted-vote-survives-stop-before-and-after-shipping
   (doseq [crash-before-ship? [true false]]
     (let [d (tmp) sent (atom []) n (boot-captured d sent)
