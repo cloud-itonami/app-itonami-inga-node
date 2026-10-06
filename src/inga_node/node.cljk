@@ -431,7 +431,23 @@
                                 ;; The server side of this file already uses
                                 ;; `ws`; using it on the client side too makes
                                 ;; the runtime version stop being a variable.
-                                :ctor (or (.-WebSocket ws) ws)
+                                ;;
+                                ;; Outbound sockets leave from `bind` when it
+                                ;; is set. An unbound connect lets the kernel
+                                ;; pick the source port from the whole
+                                ;; ephemeral range, and on a host whose other
+                                ;; services churn connections that range runs
+                                ;; out: dan (2026-10-06) held 55k TIME_WAIT
+                                ;; sockets, every unbound connect to a peer
+                                ;; failed EADDRNOTAVAIL, and its witness sat at
+                                ;; peers-out 0 while the same connect bound to
+                                ;; the tailnet address succeeded. The witness
+                                ;; already listens only on `bind`; dialing from
+                                ;; it too keeps both directions on one identity.
+                                :ctor (let [WS (or (.-WebSocket ws) ws)]
+                                        (if bind
+                                          (fn [url] (WS. url #js {:localAddress bind}))
+                                          WS))
                                 :peers (vec (keys peers))
                                 :url-of (fn [p] (get peers (wire/wire-id p)))
                                 :on-message (fn [peer m]
