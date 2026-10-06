@@ -9,7 +9,8 @@
             [inga-node.archive-sync-test]
             [inga-node.finalized-prefix-test]
             [inga-node.node-test]
-            [inga-node.ref-test]))
+            [inga-node.ref-test]
+            [inga-node.writer-test]))
 
 ;; cljs.test already prints the summary; this only makes a failure EXIT
 ;; non-zero, which is what a runner is for. Printing it twice would be a
@@ -19,4 +20,4 @@
 
 (t/run-tests 'inga-node.seams-test 'inga-node.store-test 'inga-node.archive-sync-test
              'inga-node.finalized-prefix-test 'inga-node.node-test
-             'inga-node.ref-test)
+             'inga-node.ref-test 'inga-node.writer-test)

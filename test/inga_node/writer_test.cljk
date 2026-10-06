@@ -1,0 +1,80 @@
+(ns inga-node.writer-test
+  "Writer policy on this node: real Ed25519 did:keys through
+  `seams/writer-verify-fn`, and the store refusing to give a sequence to a
+  record the policy refuses."
+  (:require [kotoba.test :refer [deftest is testing]]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            [inga.writer :as writer]
+            [inga-node.seams :as seams]
+            [inga-node.store :as store]))
+
+(def seed-op "0303030303030303030303030303030303030303030303030303030303030303")
+(def seed-x "0404040404040404040404040404040404040404040404040404040404040404")
+
+(def ^:private b58 "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+(defn- b58-encode
+  "Classic base58btc: repeated division of the byte string by 58, carried
+  digit by digit with plain integers (sci has no js-mod for BigInt)."
+  [buf]
+  (let [bytes (vec (array-seq buf))
+        zeros (count (take-while zero? bytes))
+        digits (reduce (fn [digits byte]
+                         (loop [ds digits carry byte i 0 out []]
+                           (if (< i (count ds))
+                             (let [x (+ (* (nth ds i) 256) carry)]
+                               (recur ds (quot x 58) (inc i) (conj out (rem x 58))))
+                             (if (pos? carry)
+                               (recur [] (quot carry 58) 0 (conj out (rem carry 58)))
+                               out))))
+                       [] bytes)]
+    (str (apply str (repeat zeros "1")) (apply str (map #(nth b58 %) (reverse digits))))))
+
+(defn- did-of [seed]
+  (str "did:key:z" (b58-encode (js/Buffer.concat #js [(js/Buffer.from #js [0xed 0x01])
+                                                      (js/Buffer.from (seams/public-hex seed) "hex")]))))
+
+(defn- signed [seed r]
+  (assoc r "writer" (did-of seed) "sig" ((seams/sign-fn seed) (writer/signing-text r))))
+
+(def policy {"yataverse/lake" #{(did-of seed-op)}})
+(def admit (writer/admit policy (seams/writer-verify-fn)))
+
+(defn- tmp [] (fs/mkdtempSync (path/join (os/tmpdir) "inga-node-writer-")))
+
+(defn- block [& recs]
+  {:inga.block/height 1 :inga.block/proposals (mapv #(js/JSON.stringify (clj->js %)) recs)})
+
+(deftest did-key-round-trips-to-the-raw-public-key
+  (is (= (seams/public-hex seed-op) (.toString (seams/did-key->ed25519-pub (did-of seed-op)) "hex")))
+  (is (nil? (seams/did-key->ed25519-pub "did:key:zQ3sh")) "not Ed25519")
+  (is (nil? (seams/did-key->ed25519-pub "did:key:z0OIl")) "outside base58"))
+
+(deftest real-signatures-are-admitted-and-everything-else-refused
+  (let [r {"ref" "yataverse/lake" "seq" 3 "cid" "bafyA" "prev" "bafyP"}]
+    (is (nil? (writer/refusal policy (seams/writer-verify-fn) (signed seed-op r))))
+    (is (= :writer-not-allowed (writer/refusal policy (seams/writer-verify-fn) (signed seed-x r))))
+    (testing "the operator's real signature does not survive an altered cid"
+      (is (= :bad-signature (writer/refusal policy (seams/writer-verify-fn)
+                                            (assoc (signed seed-op r) "cid" "bafyB")))))
+    (testing "an outsider claiming the operator's did:key"
+      (is (= :bad-signature (writer/refusal policy (seams/writer-verify-fn)
+                                            (assoc (signed seed-x r) "writer" (did-of seed-op))))))))
+
+(deftest the-store-gives-no-sequence-to-a-refused-record
+  (let [forged {"ref" "yataverse/lake" "seq" 0 "cid" "bafyForged"}
+        real (signed seed-op {"ref" "yataverse/lake" "seq" 0 "cid" "bafyReal"})]
+    (testing "with the policy, the first ADMITTED record holds seq 0"
+      (let [d (tmp)]
+        (is (= 1 (store/sink-blocks! d [(block forged real)] nil nil admit)))
+        (is (= "bafyReal" (get (store/head-of d "yataverse/lake") "cid")))))
+    (testing "without it the forged record wins, as before"
+      (let [d (tmp)]
+        (store/sink-blocks! d [(block forged real)])
+        (is (= "bafyForged" (get (store/head-of d "yataverse/lake") "cid")))))
+    (testing "an uncovered ref is untouched by the policy"
+      (let [d (tmp)]
+        (store/sink-blocks! d [(block {"ref" "isekai/scores" "seq" 0 "cid" "bafyS"})] nil nil admit)
+        (is (= "bafyS" (get (store/head-of d "isekai/scores") "cid")))))))
