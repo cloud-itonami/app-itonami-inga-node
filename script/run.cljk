@@ -12,8 +12,29 @@
 ;; INGA_NODE_DATA and never leaves the machine — see inga-node.identity.
 (ns run
   (:require [kotoba.lang.text :as str]
+            [kotoba.lang.edn :as edn]
+            [inga.writer :as writer]
             [inga-node.identity :as ident]
-            [inga-node.node :as node]))
+            [inga-node.node :as node]
+            [inga-node.seams :as seams]))
+
+(def ^:private fs (js/require "node:fs"))
+
+(defn- writer-admit
+  "INGA_WRITER_POLICY names an EDN file {\"ref-or-prefix/\" #{\"did:key:...\"}}
+  or, to grandfather history, {\"ref\" {\"writers\" #{...} \"from_seq\" n}}.
+  Unset means every committed record may become a head, as before. A file that
+  is set but unreadable stops the node, rather than running it unrestricted."
+  [path chain-id]
+  (when path
+    (let [policy (edn/read-string (.readFileSync fs path "utf8"))]
+      (when-not (and (map? policy) (every? string? (keys policy))
+                     (every? #(let [ws (if (set? %) % (get % "writers"))]
+                                (and (set? ws) (every? string? ws)
+                                     (or (set? %) (nat-int? (get % "from_seq" 0)))))
+                             (vals policy)))
+        (throw (ex-info "INGA_WRITER_POLICY is not {string #{did:key} | {writers from_seq}}" {:path path})))
+      (writer/admit policy chain-id (seams/writer-verify-fn)))))
 
 (defn- env [k d]
   (let [v (some-> js/process .-env (aget k))]
@@ -55,6 +76,7 @@
       :view-ms (some-> (env "INGA_VIEW_MS" nil) (js/parseInt 10))
       :archive-finalized? (= "1" (env "INGA_ARCHIVE_FINALIZED" ""))
       :archive-http? (= "1" (env "INGA_ARCHIVE_HTTP" ""))
+      :writer-admit? (writer-admit (env "INGA_WRITER_POLICY" nil) (env "INGA_CHAIN_ID" "inga-fleet-1"))
       :data-dir data-dir})))
 
 (-main)

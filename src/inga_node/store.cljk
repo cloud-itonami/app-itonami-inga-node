@@ -365,7 +365,12 @@
   before and readers fall back to trusting the host — worse, and still
   working, rather than a node that refuses to log."
   ([data-dir blocks] (sink-blocks! data-dir blocks nil nil))
-  ([data-dir blocks qcs hash-fn]
+  ([data-dir blocks qcs hash-fn] (sink-blocks! data-dir blocks qcs hash-fn (constantly true)))
+  ;; `admit?` (inga.writer/admit) drops a record before it can take a
+  ;; sequence file. head-of reads those files, so a refused record never
+  ;; becomes a head and the first ADMITTED record at its sequence wins, which
+  ;; is inga.ref/project's rule with the same predicate.
+  ([data-dir blocks qcs hash-fn admit?]
    (reduce
     (fn [n [block rec]]
       (let [f (record-path data-dir rec)
@@ -379,7 +384,8 @@
         (if existed? n (inc n))))
     0
     (for [b blocks
-          rec (keep decode-proposal (:inga.block/proposals b))]
+          rec (keep decode-proposal (:inga.block/proposals b))
+          :when (admit? rec)]
       [b rec]))))
 
 (defn proof-text
