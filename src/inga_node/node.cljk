@@ -36,6 +36,7 @@
             [inga.wire :as wire]
             [inga.net.ws :as nws]
             [inga.net.server :as srv]
+            [inga-node.cors :as cors]
             [inga-node.seams :as seams]
             [inga-node.store :as store]))
 
@@ -118,10 +119,12 @@
     :archive-http?       expose opt-in bounded archive evidence endpoints
     :writer-admit?       optional predicate (inga.writer/admit) a committed
                          record must pass to become a head; absent = all
+    :cors-origins        optional `inga-node.cors/parse-origins` value: which
+                         browser origins may read replies; absent = none
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
-  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service archive-finalized? archive-http? writer-admit?]}]
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service archive-finalized? archive-http? writer-admit? cors-origins]}]
   (let [opts {:witness witness
               :witnesses witnesses
               :quorum (c/quorum-size (count witnesses))
@@ -255,8 +258,20 @@
       (let [server (http/createServer
                     (fn [req res]
                       (let [url (js/URL. (.-url req) "http://localhost")
-                            p (.-pathname url)]
+                            p (.-pathname url)
+                            hdrs (.-headers req)
+                            preflight? (and cors-origins (= "OPTIONS" (.-method req)))]
+                        ;; setHeader, not writeHead: every branch below ends in a
+                        ;; writeHead, which merges these in, so no route can
+                        ;; forget them — including the 503 a failed node answers.
+                        (doseq [[k v] (cors/headers cors-origins (aget hdrs "origin")
+                                                    (when preflight?
+                                                      {:private-network? (= "true" (aget hdrs "access-control-request-private-network"))}))]
+                          (.setHeader res k v))
                         (cond
+                          preflight?
+                          (do (.writeHead res 204) (.end res))
+
                           @failed?
                           (json-res res 503 {:ok false :error "safety or persistence failed; restart required"})
 

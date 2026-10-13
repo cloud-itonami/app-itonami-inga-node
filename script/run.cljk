@@ -14,6 +14,7 @@
   (:require [kotoba.lang.text :as str]
             [kotoba.lang.edn :as edn]
             [inga.writer :as writer]
+            [inga-node.cors :as cors]
             [inga-node.identity :as ident]
             [inga-node.node :as node]
             [inga-node.seams :as seams]))
@@ -77,6 +78,7 @@
       :archive-finalized? (= "1" (env "INGA_ARCHIVE_FINALIZED" ""))
       :archive-http? (= "1" (env "INGA_ARCHIVE_HTTP" ""))
       :writer-admit? (writer-admit (env "INGA_WRITER_POLICY" nil) (env "INGA_CHAIN_ID" "inga-fleet-1"))
+      :cors-origins (cors/parse-origins (env "INGA_CORS_ORIGINS" nil))
       :data-dir data-dir})))
 
 (-main)
