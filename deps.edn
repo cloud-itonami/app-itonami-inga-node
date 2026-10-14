@@ -21,7 +21,7 @@
          ;; this floor. A node deployed with an older inga cannot recover a
          ;; divergent uncommitted suffix after restart.
          ;; inga.writer (inga#22) and the below-tip certified-rival request (inga#23).
-         :git/sha "e5948e1135d12f777ecf9f466c71304ed1dde6c0"}
+         :git/sha "0c5eceda229ae0a5e6d0f1b9ca834d2db2d1636f"}
        io.github.kotoba-lang/kotobase-client
         {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
          :git/sha "c7882c58efe2fe558fc2b512678c2ab56088fcc0"}

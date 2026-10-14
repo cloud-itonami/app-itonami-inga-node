@@ -1,0 +1,30 @@
+(ns inga-node.bootstrap-test
+ (:require [kotoba.test :refer [deftest is]] [inga-node.bootstrap :as b]
+           [inga-node.seams :as seams] [inga-node.store :as store]
+           ["node:fs" :as fs] ["node:os" :as os] ["node:path" :as path]))
+(defn tmp [] (fs/mkdtempSync (path/join (os/tmpdir) "inga-bootstrap-test-")))
+(defn opts [] {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"] :quorum 3
+              :pubkeys {"w1" "fixture"} :chain-id "test-only"
+              :genesis (b/genesis ["w1" "w2" "w3" "w4"] "fixture")
+              :hash-fn b/hash-v2 :sign-fn (constantly "fixture")
+              :verify-fn (constantly false)})
+(deftest custody-cannot-restart-cold-or-change-context
+ (let [d (tmp) o (opts) release! (b/acquire! d)]
+  (try
+   (is (= "test-only" (:chain-id (b/prepare! d o))))
+   (is (= (b/prepare! d o) (b/prepare! d o)))
+   (is (thrown? js/Error (b/prepare! d (assoc o :chain-id "other"))))
+   (is (thrown? js/Error (b/prepare! d (assoc o :pubkeys {"w1" "changed"}))))
+   (is (thrown? js/Error (b/acquire! d)))
+   (fs/renameSync (store/snapshot-path d) (path/join d "snapshot-retained.edn"))
+   (is (thrown? js/Error (b/prepare! d o)))
+   (finally (release!)))))
+(deftest symlink-key-is-refused
+ (let [d (tmp) target (path/join d "target") link (path/join d "link")]
+  (fs/writeFileSync target "fixture" #js {:mode 0600})
+  (fs/symlinkSync target link)
+  (is (thrown? js/Error (b/read-owned link)))))
+(deftest new-block-hash-binds-round-without-changing-legacy
+ (let [g (:genesis (opts)) other (assoc g :inga.block/round 42)]
+  (is (= (seams/hash-fn g) (seams/hash-fn other)))
+  (is (not= (b/hash-v2 g) (b/hash-v2 other)))))

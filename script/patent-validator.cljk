@@ -1,0 +1,46 @@
+;; Public config is a validator bootstrap context, not an asset issuance grant.
+(ns patent-validator
+  (:require [inga-node.bootstrap :as boot]
+            [inga-node.node :as node]
+            [inga-node.seams :as seams]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]))
+(js/process.umask 0077)
+(let [[config-file witness] *command-line-args*
+      config (js->clj (js/JSON.parse (fs/readFileSync config-file "utf8")) :keywordize-keys true)
+      witnesses (:witnesses config)
+      pubkeys (into {} (map (fn [[k v]] [(name k) v]) (:pubkeys config)))
+      asset (:asset config)
+      dir (path/join (os/homedir) ".inga" "itonami-native-patent-v1" witness)
+      release! (boot/acquire! dir)]
+  (try
+    (when-not (and (= "itonami.validator-bootstrap.v1" (:schema config))
+                   (contains? #{"en" "kumo"} asset) (= 4 (count witnesses))
+                   (= 4 (count (set (vals pubkeys)))) (some #{witness} witnesses)
+                   (= (str "patent-" asset "-") (subs witness 0 (+ 8 (count asset))))
+                   (false? (:financial-authority config)))
+      (throw (ex-info "Invalid validator bootstrap context" {})))
+    (let [seed (boot/read-owned (path/join dir "seed"))
+          _ (when-not (and (re-matches #"[0-9a-f]{64}" seed)
+                           (= (get pubkeys witness) (seams/public-hex seed)))
+              (throw (ex-info "Validator identity does not match membership" {})))
+          chain-id (:chain-id config)
+          g (boot/genesis witnesses (:context-hash config))
+          opts {:witness witness :witnesses witnesses :quorum 3 :pubkeys pubkeys
+                :chain-id chain-id :genesis g :hash-fn boot/hash-v2
+                :sign-fn (seams/sign-fn seed) :verify-fn (seams/verify-fn pubkeys)
+                :params {:base-timeout 12000 :max-doublings 6}}
+          _ (boot/prepare! dir opts)
+          peer-config (get (:peers config) (keyword witness))
+          peers (into {} (map (fn [[k v]] [(name k) v]) peer-config))
+          instance (node/start! {:witness witness :witnesses witnesses :pubkeys pubkeys
+                     :seed-hex seed :chain-id chain-id :genesis g :hash-fn boot/hash-v2
+                     :peers peers :bind "127.0.0.1" :port (if (= asset "en") 19311 19312)
+                     :tick-ms 1500 :view-ms 12000 :data-dir dir
+                     :archive-finalized? true :archive-http? true :submit-enabled? false
+                     :writer-admit? (constantly false)})
+          stop! (fn [] ((:stop! instance)) (release!) (js/process.exit 0))]
+      (.on js/process "SIGTERM" stop!) (.on js/process "SIGINT" stop!)
+      (.on js/process "exit" release!))
+    (catch :default e (release!) (throw e))))

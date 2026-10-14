@@ -1,0 +1,92 @@
+(ns inga-node.bootstrap
+  "Fail-closed custody binding for a fresh validator. Never creates keys or funds."
+  (:require [inga.replica :as replica]
+            [inga.consensus :as consensus]
+            [inga-node.store :as store]
+            [inga-node.seams :as seams]
+            [kotoba.lang.edn :as edn]
+            ["node:fs" :as fs]
+            ["node:path" :as path]
+            ["node:crypto" :as crypto]))
+
+(defn hash-v2 [block]
+  ;; Legacy seams/hash-fn is unchanged. Bind the round in this NEW chain only.
+  (-> (crypto/createHash "sha256")
+      (.update (str "inga/bootstrap-block/v2\n" (seams/hash-fn block)
+                    "\nround=" (:inga.block/round block) "\n") "utf8")
+      (.digest "hex")))
+
+(defn genesis [witnesses context-hash]
+  (consensus/make-block {:height 0 :parent-hash (str "bootstrap/" context-hash)
+                        :proposals [] :proposer (first witnesses) :ts 0 :justify nil}))
+
+(defn- safe-dir! [dir]
+  (fs/mkdirSync dir #js {:recursive true :mode 0700})
+  (let [st (fs/lstatSync dir)]
+    (when-not (and (.isDirectory st) (not (.isSymbolicLink st))
+                   (= (.-uid st) (js/process.getuid)) (zero? (bit-and (.-mode st) 077)))
+      (throw (ex-info "Unsafe bootstrap directory" {})))))
+
+(defn read-owned [file]
+  (let [fd (fs/openSync file (bit-or (.-O_RDONLY fs/constants) (.-O_NOFOLLOW fs/constants)))]
+    (try
+      (let [st (fs/fstatSync fd)]
+        (when-not (and (.isFile st) (= (.-uid st) (js/process.getuid))
+                       (zero? (bit-and (.-mode st) 077)))
+          (throw (ex-info "Unsafe bootstrap file" {})))
+        (fs/readFileSync fd "utf8"))
+      (finally (fs/closeSync fd)))))
+
+(defn- write-new! [file text]
+  (let [fd (fs/openSync file (bit-or (.-O_CREAT fs/constants) (.-O_EXCL fs/constants)
+                                    (.-O_WRONLY fs/constants) (.-O_NOFOLLOW fs/constants)) 0600)]
+    (try (fs/writeFileSync fd text "utf8") (fs/fsyncSync fd)
+         (finally (fs/closeSync fd))))
+  (let [fd (fs/openSync (path/dirname file) "r")]
+    (try (fs/fsyncSync fd) (finally (fs/closeSync fd)))))
+
+(defn acquire!
+  "Exclusive process lock. A live/reused PID refuses. Only a confirmed dead
+  local PID's lock is recovered; vote history is never discarded. No lease TTL."
+  [dir]
+  (safe-dir! dir)
+  (let [file (path/join dir "process.lock")
+        take! #(write-new! file (str (.-pid js/process)))]
+    (try (take!)
+         (catch :default e
+           (if-not (= "EEXIST" (.-code e)) (throw e)
+             (let [text (read-owned file)
+                   pid (when (re-matches #"[1-9][0-9]*" text) (js/Number text))]
+               (when-not (and pid (js/Number.isSafeInteger pid))
+                 (throw (ex-info "Invalid validator lock" {})))
+               (let [dead? (try (js/process.kill pid 0) false
+                                (catch :default p (if (= "ESRCH" (.-code p)) true (throw p))))]
+                 (when-not dead? (throw (ex-info "Validator is already running" {})))
+                 (when-not (= text (read-owned file)) (throw (ex-info "Validator lock changed" {})))
+                 (fs/unlinkSync file)
+                 (take!))))))
+    (fn [] (when (and (fs/existsSync file) (= (str (.-pid js/process)) (read-owned file)))
+             (fs/unlinkSync file)))))
+
+(defn prepare!
+  "Pin chain, genesis, membership and hash version BEFORE any vote. A retained
+  binding with missing snapshot refuses cold restart with the same key."
+  [dir opts]
+  (let [binding {:schema "inga.validator-binding.v1" :chain-id (:chain-id opts)
+                 :witness (:witness opts) :witnesses (:witnesses opts)
+                 :pubkeys (:pubkeys opts) :genesis (:genesis opts)
+                 :hash-version "inga/bootstrap-block/v2"}
+        file (path/join dir "binding.edn")
+        snap (when (fs/existsSync (store/snapshot-path dir))
+               (read-owned (store/snapshot-path dir))
+               (store/read-snapshot dir))]
+    (if (fs/existsSync file)
+      (do (when-not (= binding (edn/read-string (read-owned file)))
+            (throw (ex-info "Validator chain binding changed" {})))
+          (when-not snap (throw (ex-info "Validator vote snapshot missing; cannot reuse key cold" {})))
+          (read-owned (store/snapshot-path dir)))
+      (do (when snap (throw (ex-info "Unbound existing validator state" {})))
+          (store/write-snapshot! dir (replica/snapshot (replica/replica opts)))
+          (fs/chmodSync (store/snapshot-path dir) 0600)
+          (write-new! file (pr-str binding))))
+    binding))

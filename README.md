@@ -449,3 +449,26 @@ still searches `.cljs/.cljc/.clj`, so canonical startup/tests are currently
 blocked before loading `inga-node.proof`. Any byte-identical diagnostic mirror
 is logic evidence only, never a production startup result. The canonical
 source files remain `.cljk`; the shared toolchain owns extension resolution.
+
+## Fresh zero-authority validator bootstrap
+
+`script/patent-validator.cljk` is an opt-in host wrapper for the patent ledger
+bootstrap. It reads an existing host-local 0600 Ed25519 seed, checks it against
+the public four-witness context, binds the process exclusively to its custody
+directory, and persists immutable chain/genesis/membership metadata before votes.
+A changed context, missing durable snapshot, live duplicate PID or symlink seed
+refuses startup. Its block hash v2 additionally binds the round; legacy chains
+retain the existing hash unchanged.
+
+The wrapper binds **127.0.0.1:19311 (EN) / 19312 (KUMO)**, enables complete finalized
+archive custody, and rejects `/submit` with 403. It grants no issuance, spending,
+financial governance or asset operator authority. Public JSON configuration uses
+schema `itonami.validator-bootstrap.v1`, asset `en` or `kumo`, ordered `witnesses`,
+`pubkeys`, `chain-id`, `context-hash`, `financial-authority: false`, and per-witness
+`peers` containing existing SSH localhost forward URLs. Secret seeds never occur
+in config, argv, logs, git or network bundles. Set process umask 077.
+
+The deployed bootstrap uses four physical hosts but one administrative domain.
+The current SSH relay depends on the Mac; it does not qualify transport failover
+or funded production EN/KUMO. An independently governed financial genesis,
+application resolver and proven capital must be configured before any payment.

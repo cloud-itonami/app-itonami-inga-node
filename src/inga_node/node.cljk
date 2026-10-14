@@ -112,7 +112,10 @@
     :seed-hex   this witness's private seed
     :chain-id   string
     :port       int
-    :bind       optional local interface address (for example a tailnet IP)
+    :bind       optional local interface address (for example localhost)
+    :genesis    optional independently configured genesis block
+    :hash-fn    optional pinned block hash function for a NEW chain
+    :submit-enabled? false disables application submissions during bootstrap
     :tick-ms    int
     :data-dir   string
     :archive-finalized?  retain every finalized block from a fresh genesis
@@ -124,7 +127,7 @@
 
   Returns `{:stop! fn :state atom :advance! fn}`. `advance!` is the same
   durable transition path used by ticks and inbound messages."
-  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service archive-finalized? archive-http? writer-admit? cors-origins]}]
+  [{:keys [witness witnesses peers pubkeys seed-hex chain-id port bind tick-ms view-ms data-dir prefix-service archive-finalized? archive-http? writer-admit? cors-origins genesis hash-fn submit-enabled?]}]
   (let [opts {:witness witness
               :witnesses witnesses
               :quorum (c/quorum-size (count witnesses))
@@ -144,7 +147,8 @@
               ;; the only configuration anybody has watched survive a
               ;; Byzantine validator for a hundred blocks.
               :params {:base-timeout (or view-ms (* 8 tick-ms)) :max-doublings 6}
-              :hash-fn seams/hash-fn
+              :genesis genesis
+              :hash-fn (or hash-fn seams/hash-fn)
               :sign-fn (seams/sign-fn seed-hex)
               :verify-fn (seams/verify-fn pubkeys)}
         snap (store/read-snapshot data-dir)
@@ -400,6 +404,9 @@
                                         head (assoc :proof
                                                     (store/proof-text
                                                      data-dir ref (get head "seq"))))))
+
+                          (and (= p "/submit") (false? submit-enabled?))
+                          (json-res res 403 {:ok false :error "submission disabled for validator bootstrap"})
 
                           (and (= p "/submit") (= "POST" (.-method req)))
                           (let [chunks (atom "")]
