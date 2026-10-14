@@ -62,6 +62,41 @@ the bootstrap step, run once per node, whose output is public.
 | `GET /committed[?ref=]` | how many records the durable log holds; the head for a ref |
 | `POST /submit` | `{"record": {...}}` into this witness's pending |
 
+### Who may write a ref, and which pages may read
+
+Both are opt-in. A node that sets neither behaves exactly as before.
+
+**`INGA_WRITER_POLICY=<path.edn>`**: which writers may advance which refs
+(`inga.writer`). The file maps a ref, or a prefix ending in `/`, to the
+did:keys allowed on it:
+
+```edn
+{"wallet/"        #{"did:key:z6Mk…"}
+ "yataverse/lake" {"writers" #{"did:key:z6Mk…"} "from_seq" 12}}
+```
+
+A record on a covered ref must carry `writer` (an Ed25519 did:key in the
+set) and `sig`. `sig` is the base64 Ed25519 signature over
+`inga.writer/signing-text`, which covers the chain id and every field. A
+record that fails is still ordered, because `/submit` does not judge, but it
+never takes a sequence. The first admitted record at that sequence wins.
+Refs that the policy does not cover stay open.
+
+**`INGA_CORS_ORIGINS=*` or `https://a.example,http://localhost:5178`**:
+browser origins that may READ replies (`inga-node.cors`). An exact list
+echoes the requesting origin with `Vary: Origin`. Preflight `OPTIONS` gets
+`204`, plus the Private Network Access grant when a public page asks to reach
+a LAN or tailnet node. Credentials are never allowed: the node has no
+sessions. CORS does not decide who may write; that is the writer policy's job.
+An entry that is not `scheme://host[:port]` stops startup instead of being
+silently ignored.
+
+Measured 2026-10-13 against a 4-witness devnet with both set: an unsigned
+record and one validly signed by a did:key outside the policy were both
+committed to blocks and became the head nowhere. A kotoba-lang/app-wallet
+browser build then read `/health`, and committed seq 0 of the same ref.
+Without CORS it had only seen `Failed to fetch`.
+
 ## The devnet, and what it currently proves
 
 ```bash
@@ -255,6 +290,7 @@ src/inga_node/seams.cljk     hash/sign/verify over node:crypto — byte-identica
 src/inga_node/store.cljk     snapshot (private, bounded) + committed log
                              (shared, one file per (ref, seq), first write wins)
 src/inga_node/node.cljk      the wiring: sockets, clock, HTTP
+src/inga_node/cors.cljk      which browser origins may read replies (opt-in)
 script/run.cljk              one witness from the environment
 script/devnet.cljk           seven processes and a kill
 ```
