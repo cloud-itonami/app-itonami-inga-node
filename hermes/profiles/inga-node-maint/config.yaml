@@ -1,0 +1,180 @@
+model:
+  provider: murakumo
+  default: mishima
+  max_tokens: 1024
+  context_length: 131072
+  base_url: https://api.murakumo.cloud/v1
+providers:
+  murakumo:
+    base_url: https://api.murakumo.cloud/v1
+    api_mode: chat_completions
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    stale_timeout_seconds: 600
+    request_timeout_seconds: 2000
+fallback_providers: []
+agent:
+  max_turns: 500
+compression:
+  threshold_tokens: 20000
+  proactive_prune_tokens: 16000
+  protect_last_n: 8
+  tail_mode: lean
+auxiliary:
+  free_only: true
+  vision:
+    provider: murakumo
+    model: qwen3-vl-2b-instruct
+    base_url: https://api.murakumo.cloud/v1
+    reasoning_effort: none
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  compression:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    reasoning_effort: none
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  skills_hub:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  approval:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  mcp:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  title_generation:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    reasoning_effort: none
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  triage_specifier:
+    provider: murakumo
+    model: mishima
+    base_url: https://api.murakumo.cloud/v1
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+  web_extract:
+    base_url: https://api.murakumo.cloud/v1
+    model: mishima
+    provider: murakumo
+    key_env: CUSTOM_PROVIDER_MURAKUMO_KEY
+    fallback_chain: []
+approvals:
+  destructive_slash_confirm: false
+  mode: 'off'
+plugins:
+  disabled: []
+  enabled:
+  - hermes-zap-proxy
+  entries:
+    hermes-zap-proxy:
+      allow_tool_override: false
+      settings:
+        zap_proxy_targets:
+        - allow_active: false
+          url: http://127.0.0.1:8765
+cron:
+  max_parallel_jobs: 12
+  bot_chat_delivery_timeout_seconds: 900
+_config_version: 46
+mcp_servers:
+  cloudflare:
+    url: https://mcp.cloudflare.com/mcp?codemode=false
+    auth: oauth
+    enabled: true
+    tools:
+      exclude:
+      - docs
+      - '*_radar_*'
+      - '*_accounts_magic_*'
+      - '*_accounts_mnm_*'
+      - '*_accounts_cni_*'
+      - '*_accounts_teamnet_*'
+      - '*_accounts_cloudforceone_*'
+      - '*_accounts_dlp_*'
+      - '*_accounts_devices*'
+      - '*_accounts_dex_*'
+      - '*_accounts_datasecurity_*'
+      - '*_accounts_emailsecurity_*'
+      - '*_accounts_scim_*'
+      - '*_accounts_gateway*'
+      - '*_accounts_zerotrust_*'
+      - '*_accounts_one_*'
+      - '*_accounts_brandprotection_*'
+      - '*_accounts_intel_*'
+      - '*_accounts_urlscanner_*'
+      - '*_accounts_vuln_scanner_*'
+      - '*_zones_securitycenter_*'
+      - '*_accounts_securitycenter_*'
+      - '*_zones_api_gateway_*'
+      - '*_zones_schema_validation*'
+      - '*_zones_token_validation*'
+      - '*_zones_waiting_rooms*'
+      - '*_accounts_addressing_*'
+      - '*_accounts_shares*'
+      - '*_accounts_slurper_*'
+      - '*_zones_web3_*'
+      - '*_accounts_flagship_*'
+      - '*_zones_secondary_dns_*'
+      - '*_accounts_secondary_dns_*'
+      - '*_user_load_balancers*'
+  github-forest:
+    command: /opt/homebrew/bin/node
+    args:
+    - /Users/junkawasaki/github/com-junkawasaki/west-manifest/scripts/forest-maintenance.mjs
+    - mcp
+    lazy: true
+provider_routing:
+  order:
+  - Relace
+  - StreamLake
+  ignore:
+  - Wafer
+terminal:
+  backend: local
+  cwd: /Users/junkawasaki/github/workspaces/hermes-profiles/itonami/home
+  timeout: 180
+  lifetime_seconds: 300
+command_allowlist:
+- SQL TRUNCATE
+- access to SSH keys (Windows path)
+- command parser limit or malformed executable payload
+- copy/move file into system config path
+- delete in root path
+- git branch force delete
+- git force push (rewrites remote history)
+- git force push short flag (rewrites remote history)
+- git reset --hard (destroys uncommitted changes)
+- overwrite project env/config file
+- overwrite project env/config via redirection
+- overwrite project env/config via tee
+- overwrite system file via tee
+- pipe remote content to shell
+- recursive delete
+- script execution via -e/-c flag
+- script execution via heredoc
+- shell command via -c/-lc flag
+- shell execution via heredoc
+- stop/restart hermes gateway (kills running agents)
+- stop/restart hermes launchd service (kills running agents)
+- stop/restart system service
+onboarding:
+  seen:
+    busy_input_prompt: true
+    openclaw_residue_cleanup: true
+    tool_progress_prompt: true
+gateway:
+  cron_only: true
