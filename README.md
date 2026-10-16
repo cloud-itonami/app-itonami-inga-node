@@ -60,6 +60,7 @@ the bootstrap step, run once per node, whose output is public.
 |---|---|
 | `GET /health` | height, committed height, view, pending, peers, and which step of a round is missing |
 | `GET /committed[?ref=]` | how many records the durable log holds; the head for a ref |
+| `GET /current-ref?ref=<ref>&challenge=<nonce>` | one witness's signed current head observation and commitment-proof sidecar; rejects missing/ambiguous parameters, but is not a quorum or finality proof |
 | `POST /submit` | `{"record": {...}}` into this witness's pending |
 
 ### Who may write a ref, and which pages may read

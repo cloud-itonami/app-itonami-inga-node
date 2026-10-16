@@ -31,6 +31,7 @@
             ["node:http" :as http]
             [inga.replica :as r]
             [inga.consensus :as c]
+            [inga.current-ref-read :as current-ref-read]
             [inga.prefix :as prefix]
             [inga.sync :as sync]
             [inga.wire :as wire]
@@ -50,6 +51,53 @@
   (when (and (string? value) (re-matches #"(0|[1-9][0-9]*)" value))
     (let [n (js/Number value)]
       (when (js/Number.isSafeInteger n) n))))
+
+(defn- valid-current-ref-request?
+  [ref challenge]
+  (and (string? ref) (<= 1 (count ref) 1024)
+       (not (str/includes? ref "\n"))
+       (not (str/includes? ref "\r"))
+       (not (str/includes? ref "\u0000"))
+       (string? challenge) (<= 16 (count challenge) 256)
+       (boolean (re-matches #"[A-Za-z0-9_-]+" challenge))))
+
+(defn- current-ref-query
+  [parameters]
+  (let [refs (.getAll parameters "ref")
+        challenges (.getAll parameters "challenge")
+        keys (js/Array.from (.keys parameters))]
+    (when (and (= 1 (.-length refs))
+               (= 1 (.-length challenges))
+               (= 2 (.-length keys)))
+      (let [ref (aget refs 0)
+            challenge (aget challenges 0)]
+        (when (valid-current-ref-request? ref challenge)
+          {:ref ref :challenge challenge})))))
+
+(defn current-ref-response
+  "Sign this witness's current committed ref head for one client challenge.
+
+  A present head is returned only when its membership proof sidecar is also
+  present. The response signature proves the witness observed these exact
+  ref/sequence/CID fields at `observed-at`; clients still verify the
+  commitment and finality evidence separately and collect a trusted quorum."
+  [data-dir {:keys [chain-id witness ref challenge observed-at sign-fn]}]
+  (when (and (valid-current-ref-request? ref challenge)
+             (string? chain-id) (seq chain-id)
+             (string? witness) (seq witness)
+             (js/Number.isSafeInteger observed-at)
+             (not (neg? observed-at))
+             (fn? sign-fn))
+    (let [head (store/head-of data-dir ref)
+          proof (when head (store/proof-text data-dir ref (get head "seq")))]
+      (when (or (nil? head) (and (string? proof) (seq proof)
+                                 (= ref (get head "ref"))))
+        (when-let [signed (current-ref-read/signed-read
+                           {:chain-id chain-id :witness witness :ref ref
+                            :head-seq (get head "seq") :head-cid (get head "cid")
+                            :challenge challenge :observed-at observed-at}
+                           sign-fn)]
+          (assoc signed :head head :commitment-proof proof))))))
 
 (defn- edn-res [res value]
   (let [body (pr-str value)]
@@ -379,6 +427,26 @@
                                   (json-res res 503 {:ok false :error "complete prefix unavailable"})))
                               (catch :default _
                                 (json-res res 503 {:ok false :error "complete prefix unavailable"}))))
+
+                          (= p "/current-ref")
+                          (do
+                            (.setHeader res "cache-control" "no-store, max-age=0")
+                            (if-not (= "GET" (.-method req))
+                              (json-res res 405 {:ok false :error "GET required"})
+                              (if-let [{:keys [ref challenge]}
+                                       (current-ref-query (.-searchParams url))]
+                                (try
+                                  (if-let [response (current-ref-response
+                                                     data-dir
+                                                     {:chain-id chain-id :witness witness
+                                                      :ref ref :challenge challenge
+                                                      :observed-at (now)
+                                                      :sign-fn (:sign-fn opts)})]
+                                    (json-res res 200 response)
+                                    (json-res res 503 {:ok false :error "current ref proof unavailable"}))
+                                  (catch :default _
+                                    (json-res res 503 {:ok false :error "current ref proof unavailable"})))
+                                (json-res res 400 {:ok false :error "exactly one ref and challenge required"}))))
 
                           (= p "/committed")
                           (let [ref (.get (.-searchParams url) "ref")
