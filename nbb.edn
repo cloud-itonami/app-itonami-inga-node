@@ -9,4 +9,4 @@
         ;; only from nbb.edn, so every project file this repo has names it.
         io.github.kotoba-lang/edn {:git/sha "79dba32c8892058842c57783f06a2dfe4601aeb0"}
         io.github.kotoba-lang/inga {:git/url "https://github.com/kotoba-lang/inga.git"
-                                    :git/sha "7e368fbc0c3777dbb95f8b7153b47f18d174d68d"}}}
+                                    :git/sha "cb87cdb38d73e24e9ec0c454360c3fa80a323cc5"}}}
