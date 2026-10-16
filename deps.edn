@@ -22,7 +22,7 @@
          ;; divergent uncommitted suffix after restart.
          ;; inga.writer (inga#22), the below-tip certified-rival request (inga#23),
          ;; and challenge-bound `inga.current-ref-read` responses.
-         :git/sha "7e368fbc0c3777dbb95f8b7153b47f18d174d68d"}
+         :git/sha "cb87cdb38d73e24e9ec0c454360c3fa80a323cc5"}
        io.github.kotoba-lang/kotobase-client
         {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
          :git/sha "c7882c58efe2fe558fc2b512678c2ab56088fcc0"}
