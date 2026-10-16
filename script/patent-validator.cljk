@@ -12,6 +12,9 @@
       witnesses (:witnesses config)
       pubkeys (into {} (map (fn [[k v]] [(name k) v]) (:pubkeys config)))
       asset (:asset config)
+      _ (when-not (and (string? witness)
+                       (re-matches #"patent-(en|kumo)-[A-Za-z0-9][A-Za-z0-9-]{0,63}" witness))
+          (throw (ex-info "Invalid validator witness name" {})))
       dir (path/join (os/homedir) ".inga" "itonami-native-patent-v1" witness)
       release! (boot/acquire! dir)]
   (try
