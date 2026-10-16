@@ -22,6 +22,7 @@
             [inga-node.store :as store]
             [inga-node.node :as node]
             [inga-node.seams :as seams]
+            [inga.current-ref-read :as current-ref-read]
             [inga.replica :as r]
             [inga.net.ws :as nws]
             ["node:crypto" :as crypto]))
@@ -40,12 +41,18 @@
   (node/start! {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
                 :peers {} :pubkeys {}
                 :seed-hex (ident/ensure-seed! d)
-                :chain-id "inga-node-test" :port p
+                :chain-id "inga-node-test" :port p :bind "127.0.0.1"
                 :tick-ms 100000   ; long enough that no tick fires mid-test
                 :data-dir d}))
 
 (defn- GET [p path]
   (-> (js/fetch (str "http://127.0.0.1:" p path)) (.then #(.json %))))
+
+(defn- GET-with-status [p route]
+  (-> (js/fetch (str "http://127.0.0.1:" p route))
+      (.then (fn [res]
+               (-> (.json res)
+                   (.then (fn [body] [(.-status res) body])))))))
 
 (defn- POST [p path body]
   (-> (js/fetch (str "http://127.0.0.1:" p path)
@@ -173,12 +180,88 @@
                    (done)))
           (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (done)))))))
 
+(declare boot-captured)
+
+(deftest current-ref-signs-the-local-head-and-binds-the-client-challenge
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 9)
+          seed (.toString (crypto/randomBytes 32) "hex")
+          n (boot-captured d (atom []) seed p)
+          challenge "nonce-123456789abc"
+          route (str "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=" challenge)]
+      (-> (GET p route)
+          (.then (fn [js-response]
+                   (let [response (js->clj js-response :keywordize-keys true)
+                         verifier (seams/verify-fn
+                                   {"w2" (seams/public-hex (:test-seed n))})]
+                     (is (= "inga.current-ref-read/v1" (:version response)))
+                     (is (= "w2" (:witness response)))
+                     (is (= "durability-test" (:chain-id response)))
+                     (is (= "awai/app/test/stable" (:ref response)))
+                     (is (= challenge (:challenge response)))
+                     (is (nil? (:head response)))
+                     (is (true? (verifier "w2" (current-ref-read/payload response)
+                                          (:signature response))))
+                     (is (false? (verifier "w2"
+                                           (current-ref-read/payload
+                                            (assoc response :challenge "other-nonce-123456"))
+                                           (:signature response))))
+                     ((:stop! n))
+                     (done))))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
+(deftest current-ref-does-not-sign-a-head-without-its-commitment-proof
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 10) n (boot d p)]
+      (store/sink-blocks!
+       d [{:inga.block/proposals
+           [(js/JSON.stringify (clj->js (rec "awai/app/test/stable" 0 "cid-a")))]}])
+      (-> (GET-with-status
+           p "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=nonce-123456789abc")
+          (.then (fn [[status body]]
+                   (is (= 503 status))
+                   (is (false? (aget body "ok")))
+                   (is (= "current ref proof unavailable" (aget body "error")))
+                   ((:stop! n))
+                   (done)))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
+(deftest current-ref-rejects-ambiguous-or-extended-queries
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 11) n (boot d p)
+          duplicate "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&ref=other&challenge=nonce-123456789abc"
+          extra "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=nonce-123456789abc&extra=1"]
+      (-> (GET-with-status p duplicate)
+          (.then (fn [[status body]]
+                   (is (= 400 status))
+                   (is (= "exactly one ref and challenge required" (aget body "error")))
+                   (GET-with-status p extra)))
+          (.then (fn [[status body]]
+                   (is (= 400 status))
+                   (is (= "exactly one ref and challenge required" (aget body "error")))
+                   ((:stop! n))
+                   (done)))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
 ;; Tests call the actual advance! closure returned by start!, using the real
 ;; signed replica transition. Only transport delivery and failure injection
 ;; are replaced. No network peer, credential store, or funds are involved.
 (defn- boot-captured
-  ([d sent] (boot-captured d sent (.toString (crypto/randomBytes 32) "hex")))
-  ([d sent seed]
+  ([d sent] (boot-captured d sent (.toString (crypto/randomBytes 32) "hex") 0))
+  ([d sent seed] (boot-captured d sent seed 0))
+  ([d sent seed p]
     (with-redefs [nws/make-node
                   (fn [_] {:tick! (fn []) :close-all! (fn [])
                            :broadcast! (fn [msg]
@@ -188,7 +271,7 @@
                                          (swap! sent conj msg))})]
       (assoc (node/start! {:witness "w2" :witnesses ["w1" "w2" "w3" "w4"]
                     :peers {} :pubkeys {"w2" (seams/public-hex seed)}
-                    :seed-hex seed :chain-id "durability-test" :port 0
+                    :seed-hex seed :chain-id "durability-test" :port p :bind "127.0.0.1"
                     :tick-ms 100000 :data-dir d}) :test-seed seed))))
 
 (deftest persist-failure-emits-zero-votes-and-poisons-instance

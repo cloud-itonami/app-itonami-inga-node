@@ -20,8 +20,9 @@
          ;; Archive-backed sync requires certified ahead-branch requests from
          ;; this floor. A node deployed with an older inga cannot recover a
          ;; divergent uncommitted suffix after restart.
-         ;; inga.writer (inga#22) and the below-tip certified-rival request (inga#23).
-         :git/sha "e5948e1135d12f777ecf9f466c71304ed1dde6c0"}
+         ;; inga.writer (inga#22), the below-tip certified-rival request (inga#23),
+         ;; and challenge-bound `inga.current-ref-read` responses.
+         :git/sha "a86975cba59c9464f6c65c00986e1e7e93f4874b"}
        io.github.kotoba-lang/kotobase-client
         {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
          :git/sha "c7882c58efe2fe558fc2b512678c2ab56088fcc0"}
