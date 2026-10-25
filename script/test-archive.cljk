@@ -1,4 +1,4 @@
-(require '[clojure.test :as t] '[inga-node.archive-test] '[inga-node.archive-runtime-test])
+(require '[kotoba.test :as t] '[inga-node.archive-test] '[inga-node.archive-runtime-test])
 (def completed? (atom false))
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (reset! completed? true)

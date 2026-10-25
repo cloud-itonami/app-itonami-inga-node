@@ -1,13 +1,17 @@
-;; The unit suite. `nbb --classpath "src:test:<inga>/src" script/test.cljk`
+;; The unit suite. `kbb --backend sci --classpath "src:test:<inga>/src" script/test.cljk`
 ;;
 ;; Separate from `script/devnet.cljk`, which spawns processes and takes a
 ;; minute: a suite nobody runs because it is slow is a suite nobody runs.
 (ns test-runner
-  (:require [clojure.test :as t]
+  (:require [kotoba.test :as t]
             [inga-node.seams-test]
             [inga-node.store-test]
+            [inga-node.archive-sync-test]
+            [inga-node.finalized-prefix-test]
             [inga-node.node-test]
-            [inga-node.ref-test]))
+            [inga-node.ref-test]
+            [inga-node.writer-test]
+            [inga-node.cors-test]))
 
 ;; cljs.test already prints the summary; this only makes a failure EXIT
 ;; non-zero, which is what a runner is for. Printing it twice would be a
@@ -15,5 +19,6 @@
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (when (pos? (+ (:fail m) (:error m))) (js/process.exit 1)))
 
-(t/run-tests 'inga-node.seams-test 'inga-node.store-test 'inga-node.node-test
-             'inga-node.ref-test)
+(t/run-tests 'inga-node.seams-test 'inga-node.store-test 'inga-node.archive-sync-test
+             'inga-node.finalized-prefix-test 'inga-node.node-test
+             'inga-node.ref-test 'inga-node.writer-test 'inga-node.cors-test)

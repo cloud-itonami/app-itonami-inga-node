@@ -8,7 +8,7 @@
   witness's, so signatures verify against nothing and the replica is refused
   by peers with no error anywhere. The round-trip below is the check that a
   reviewer cannot do by reading."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             ["node:crypto" :as nc]
             [inga-node.seams :as seams]))
 

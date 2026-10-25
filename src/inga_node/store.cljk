@@ -17,7 +17,7 @@
   durability is a precondition of the witness protocol, and depends on a
   filesystem honoring fsync and a single process owning this directory."
   (:require [kotoba.lang.text :as str]
-            [clojure.edn :as edn]
+            [kotoba.lang.edn :as edn]
             [inga-node.proof :as proof]
             ["node:fs" :as fs]
             ["node:path" :as path]))
@@ -80,6 +80,226 @@
   [n]
   (let [s (str n)]
     (str (str/join "" (repeat (max 0 (- 12 (count s))) "0")) s)))
+
+;; A bounded replica snapshot cannot prove that an earlier record did not win
+;; a ref. Keep every finalized block when a fresh chain explicitly opts in.
+;; This is local custody for a future complete-prefix verifier, not authority
+;; by itself: readers must check the chain and a signed certificate for its tip.
+(defn- finalized-dir [data-dir] (path/join data-dir "finalized-blocks"))
+(defn- finalized-path [data-dir height]
+  (path/join (finalized-dir data-dir) (str (pad height) ".edn")))
+
+(defn- archived-entry [data-dir height]
+  (let [f (finalized-path data-dir height)]
+    (when (fs/existsSync f)
+      (let [v (edn/read-string (fs/readFileSync f "utf8"))]
+        (when-not (map? v)
+          (throw (ex-info "inga-node: malformed finalized archive entry" {:height height})))
+        v))))
+
+(defn- fsync-dir! [dir]
+  (let [fd (fs/openSync dir "r")]
+    (try (fs/fsyncSync fd) (finally (fs/closeSync fd)))))
+
+(defn- archive-height [filename]
+  (when-let [[_ digits] (re-matches #"([0-9]+)\.edn" filename)]
+    (let [height (js/Number digits)]
+      (when (and (js/Number.isSafeInteger height)
+                 (= filename (str (pad height) ".edn")))
+        height))))
+
+(defn- quarantine-ahead!
+  "Only a contiguous suffix above the durable snapshot may be moved. The
+  process persists archive entries before the snapshot and ships votes only
+  after both, so this suffix was never part of durable voting state. Move
+  highest first: an interrupted quarantine leaves a shorter contiguous
+  suffix that the next start can handle. Keep every byte for inspection."
+  [data-dir expected ahead]
+  (let [archive (finalized-dir data-dir)
+        quarantine (fs/mkdtempSync (path/join data-dir "finalized-ahead-"))]
+    (fs/chmodSync quarantine 0700)
+    (fsync-dir! data-dir)
+    (doseq [h (reverse ahead)]
+      (fs/renameSync (finalized-path data-dir h)
+                     (path/join quarantine (str (pad h) ".edn")))
+      (fsync-dir! archive)
+      (fsync-dir! quarantine))
+    (.warn js/console
+           (str "inga-node: preserved " (count ahead)
+                " archive entries ahead of durable height " expected
+                " in " quarantine))
+    quarantine))
+
+(defn verify-finalized-archive!
+  "Fail closed when an opted-in witness lacks a contiguous archive from genesis
+  through its snapshot's committed block. A fresh witness may start empty.
+  A bounded, contiguous suffix above a PRESENT durable snapshot is preserved
+  in a quarantine directory after the committed prefix is verified. No file
+  at or below the snapshot height is repaired or discarded."
+  [data-dir snap hash-fn]
+  (let [dir (finalized-dir data-dir)
+        expected (if (seq (:committed snap))
+                   (:inga.block/height (peek (:committed snap))) -1)
+        files (if (fs/existsSync dir) (vec (fs/readdirSync dir)) [])
+        expected-files (set (map #(str (pad %) ".edn") (range (inc expected))))
+        ahead-files (remove expected-files files)
+        parsed-ahead (mapv archive-height ahead-files)
+        ahead (when (every? some? parsed-ahead) (sort parsed-ahead))]
+    (when (and snap (not (vector? (:committed snap))))
+      (throw (ex-info "inga-node: snapshot has no committed archive anchor" {})))
+    (when-not (and (= (count files) (+ (count expected-files) (count ahead)))
+                   (every? (set files) expected-files)
+                   (or (and (empty? ahead-files) (empty? ahead))
+                       (and snap (<= (count ahead) 256)
+                            (= (count ahead-files) (count ahead))
+                            (= ahead (range (inc expected)
+                                            (+ (inc expected) (count ahead)))))))
+      (throw (ex-info "inga-node: finalized archive missing or ahead" {:expected expected})))
+    (loop [h 0 previous nil]
+      (when (<= h expected)
+        (let [{:keys [block hash qc]} (archived-entry data-dir h)
+              actual (when block (hash-fn block))]
+          (when-not (and (= h (:inga.block/height block)) (= hash actual)
+                         (or (zero? h) (= previous (:inga.block/parent-hash block)))
+                         (or (nil? qc) (= hash (:inga.qc/block-hash qc))))
+            (throw (ex-info "inga-node: invalid finalized archive chain" {:height h})))
+          (recur (inc h) hash))))
+    (when (nat-int? expected)
+      (when-not (= (hash-fn (peek (:committed snap)))
+                   (:hash (archived-entry data-dir expected)))
+        (throw (ex-info "inga-node: finalized archive contradicts snapshot" {}))))
+    (when (seq ahead)
+      (quarantine-ahead! data-dir expected ahead)
+      (when-not (= expected-files (set (fs/readdirSync dir)))
+        (throw (ex-info "inga-node: finalized archive quarantine incomplete" {}))))
+    expected))
+
+(defn append-finalized!
+  "Append newly committed blocks with any locally available certificates, in
+  height order. A replica can learn a finalized block by sync before receiving
+  that block's own QC; the complete-prefix verifier needs a certified tip, not
+  a separate QC for every committed block. Missing parent, mismatched QC, or
+  conflicting bytes refuses before snapshot durability. A partial archive
+  after a crash is detected on restart."
+  [data-dir blocks qcs hash-fn]
+  (let [dir (finalized-dir data-dir)]
+    (ensure-dir! dir)
+    (doseq [block blocks]
+      (let [h (:inga.block/height block)
+            _ (when-not (nat-int? h)
+                (throw (ex-info "inga-node: finalized archive invalid height" {:height h})))
+            hash (hash-fn block)
+            qc (get qcs hash)
+            prev (when (pos? h) (archived-entry data-dir (dec h)))
+            entry {:block block :hash hash :qc qc}
+            f (finalized-path data-dir h)]
+        (when-not (or (zero? h)
+                      (= (:hash prev) (:inga.block/parent-hash block)))
+          (throw (ex-info "inga-node: finalized archive missing parent"
+                          {:height h})))
+        (when-not (or (nil? qc) (= hash (:inga.qc/block-hash qc)))
+          (throw (ex-info "inga-node: finalized archive mismatched certificate"
+                          {:height h})))
+        (if (fs/existsSync f)
+          (when-not (= entry (archived-entry data-dir h))
+            (throw (ex-info "inga-node: finalized archive conflict" {:height h})))
+          (let [fd (fs/openSync f "wx" 0600)]
+            (try
+              (fs/writeFileSync fd (pr-str entry) "utf8")
+              (fs/fsyncSync fd)
+              (finally (fs/closeSync fd)))
+            (let [parent (fs/openSync dir "r")]
+              (try (fs/fsyncSync parent) (finally (fs/closeSync parent))))))))))
+
+(defn finalized-range
+  "Read one bounded, contiguous range from the locally verified archive.
+  Refuse malformed requests; a missing or changed archived block is a storage
+  fault, never an empty successful response. The receiving replica verifies
+  each parent QC and the target QC before adopting these bytes."
+  [data-dir from to committed hash-fn max-blocks]
+  (when (and (nat-int? from) (nat-int? to) (<= from to committed)
+             (pos-int? max-blocks) (<= (inc (- to from)) max-blocks))
+    (let [anchor (when (pos? from) (archived-entry data-dir (dec from)))
+          _ (when (and (pos? from)
+                       (not= (:hash anchor) (some-> anchor :block hash-fn)))
+              (throw (ex-info "inga-node: invalid sync archive anchor" {:height (dec from)})))
+          entries (mapv #(archived-entry data-dir %) (range from (inc to)))]
+      (loop [prev (:hash anchor) [entry & more] entries h from blocks []]
+        (if-not entry
+          (if (> h to) (vec blocks)
+              (throw (ex-info "inga-node: missing sync archive block" {:height h})))
+          (let [{:keys [block hash qc]} entry]
+            (when-not (and (= h (:inga.block/height block))
+                           (= hash (when block (hash-fn block)))
+                           (or (zero? h) (= prev (:inga.block/parent-hash block)))
+                           (or (nil? qc) (= hash (:inga.qc/block-hash qc))))
+              (throw (ex-info "inga-node: invalid sync archive block" {:height h})))
+            (recur hash more (inc h) (conj blocks block))))))))
+
+(defn finalized-checkpoint
+  "A fixed, certified tip for a paged reader. The committed block is read
+  from disk, then its two direct descendants and the tip QC come from one
+  replica state. A reader must verify every page from its trusted genesis
+  through :committed-height, followed by these three blocks and :tip-qc.
+  The checkpoint alone does not authenticate the earlier history."
+  [data-dir state]
+  (let [hash-fn (:hash-fn state)
+        h (:inga.block/height (peek (:committed state)))]
+    (when-not (nat-int? h)
+      (throw (ex-info "inga-node: no finalized checkpoint" {})))
+    (let [anchor (first (finalized-range data-dir h h h hash-fn 1))
+          descendants (->> (:chain state)
+                           (filter #(<= (inc h) (:inga.block/height %)))
+                           (sort-by :inga.block/height)
+                           (take 2) vec)
+          blocks (into [anchor] descendants)
+          tip (peek blocks)
+          qc (get (:qcs state) (hash-fn tip))]
+      (when-not (and (= 3 (count blocks)) qc
+                     (every? true?
+                             (for [[parent child] (partition 2 1 blocks)]
+                               (and (= (inc (:inga.block/height parent))
+                                       (:inga.block/height child))
+                                    (= (hash-fn parent) (:inga.block/parent-hash child))
+                                    (= (hash-fn parent)
+                                       (get-in child [:inga.block/justify :inga.qc/block-hash])))))
+                     (= (hash-fn tip) (:inga.qc/block-hash qc))
+                     (= (:inga.block/height tip) (:inga.qc/height qc)))
+        (throw (ex-info "inga-node: no certified finalized checkpoint" {})))
+      {:committed-height h :blocks blocks :tip-qc qc})))
+
+(defn finalized-prefix
+  "Build a complete prefix from the immutable local archive plus the live
+  certified tail. This is evidence for a separate verifier, not an authority
+  decision. A missing file, fork, or absent tip certificate refuses."
+  [data-dir state max-blocks]
+  (let [hash-fn (:hash-fn state)
+        committed (:inga.block/height (peek (:committed state)))]
+    (when-not (and (pos-int? max-blocks) (nat-int? committed)
+                   (< committed max-blocks))
+      (throw (ex-info "inga-node: finalized prefix unavailable or too long" {})))
+    (verify-finalized-archive! data-dir {:committed (vec (take-last 1 (:committed state)))} hash-fn)
+    (let [archived (mapv #(-> (archived-entry data-dir %) :block)
+                         (range (inc committed)))
+          tail (->> (:chain state)
+                    (filter #(< committed (:inga.block/height %)))
+                    (sort-by :inga.block/height) vec)
+          blocks (into archived tail)
+          _ (when (> (count blocks) max-blocks)
+              (throw (ex-info "inga-node: finalized prefix too long" {})))
+          _ (doseq [[parent child] (partition 2 1 blocks)]
+              (when-not (and (= (inc (:inga.block/height parent))
+                                (:inga.block/height child))
+                             (= (hash-fn parent) (:inga.block/parent-hash child)))
+                (throw (ex-info "inga-node: finalized prefix tail mismatch" {}))))
+          certified (last (keep-indexed
+                           (fn [i block]
+                             (when-let [qc (get (:qcs state) (hash-fn block))]
+                               [i qc])) blocks))]
+      (when-not certified
+        (throw (ex-info "inga-node: finalized prefix has no certified tip" {})))
+      (let [[i qc] certified]
+        {:blocks (subvec blocks 0 (inc i)) :tip-qc qc}))))
 
 (defn decode-proposal
   "A proposal string back into a head record, or nil.
@@ -145,7 +365,12 @@
   before and readers fall back to trusting the host — worse, and still
   working, rather than a node that refuses to log."
   ([data-dir blocks] (sink-blocks! data-dir blocks nil nil))
-  ([data-dir blocks qcs hash-fn]
+  ([data-dir blocks qcs hash-fn] (sink-blocks! data-dir blocks qcs hash-fn (constantly true)))
+  ;; `admit?` (inga.writer/admit) drops a record before it can take a
+  ;; sequence file. head-of reads those files, so a refused record never
+  ;; becomes a head and the first ADMITTED record at its sequence wins, which
+  ;; is inga.ref/project's rule with the same predicate.
+  ([data-dir blocks qcs hash-fn admit?]
    (reduce
     (fn [n [block rec]]
       (let [f (record-path data-dir rec)
@@ -159,7 +384,8 @@
         (if existed? n (inc n))))
     0
     (for [b blocks
-          rec (keep decode-proposal (:inga.block/proposals b))]
+          rec (keep decode-proposal (:inga.block/proposals b))
+          :when (admit? rec)]
       [b rec]))))
 
 (defn proof-text

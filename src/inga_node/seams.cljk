@@ -87,3 +87,38 @@
                       (js/Buffer.from sig "base64"))
            (catch :default _ false))
       false)))
+
+;; ── ref writers (inga.writer) ─────────────────────────────────────────────
+
+(def ^:private b58-alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+(defn- b58-decode
+  "base58btc text -> Buffer, or nil on a character outside the alphabet."
+  [text]
+  (let [digits (map #(.indexOf b58-alphabet %) text)]
+    (when (every? #(>= % 0) digits)
+      (let [n (reduce (fn [acc d] (+ (* acc (js/BigInt 58)) (js/BigInt d))) (js/BigInt 0) digits)
+            hex (if (= n (js/BigInt 0)) "" (.toString n 16))
+            hex (if (odd? (count hex)) (str "0" hex) hex)
+            zeros (count (take-while #(= "1" %) (map str text)))]
+        (js/Buffer.concat #js [(js/Buffer.alloc zeros) (js/Buffer.from hex "hex")])))))
+
+(defn did-key->ed25519-pub
+  "The 32 raw public-key bytes of an Ed25519 did:key, or nil for anything
+  else (another curve, a malformed key)."
+  [did]
+  (when (and (string? did) (str/starts-with? did "did:key:z"))
+    (when-let [raw (b58-decode (subs did (count "did:key:z")))]
+      (when (and (= 34 (.-length raw)) (= 0xed (aget raw 0)) (= 0x01 (aget raw 1)))
+        (.subarray raw 2)))))
+
+(defn writer-verify-fn
+  "`(fn [writer text sig])` for `inga.writer/admit`: `writer` is an Ed25519
+  did:key and `sig` the base64 signature over `text`, the same encoding
+  `sign-fn` produces. Anything unreadable verifies as false."
+  []
+  (fn [writer text sig]
+    (if-let [pub (did-key->ed25519-pub writer)]
+      (try (nc/verify nil (js/Buffer.from text "utf8") (der-public pub) (js/Buffer.from sig "base64"))
+           (catch :default _ false))
+      false)))

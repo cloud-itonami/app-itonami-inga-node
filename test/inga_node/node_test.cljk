@@ -13,7 +13,7 @@
   survive here is the replica's own state and the submitted work, which is
   exactly what `inga.replica/snapshot` carries and what a cold start would
   silently discard."
-  (:require [clojure.test :refer [deftest is testing async]]
+  (:require [kotoba.test :refer [deftest is testing async]]
             [kotoba.lang.text :as str]
             ["node:fs" :as fs]
             ["node:os" :as os]
@@ -22,6 +22,7 @@
             [inga-node.store :as store]
             [inga-node.node :as node]
             [inga-node.seams :as seams]
+            [inga.current-ref-read :as current-ref-read]
             [inga.replica :as r]
             [inga.net.ws :as nws]
             ["node:crypto" :as crypto]))
@@ -40,12 +41,18 @@
   (node/start! {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
                 :peers {} :pubkeys {}
                 :seed-hex (ident/ensure-seed! d)
-                :chain-id "inga-node-test" :port p
+                :chain-id "inga-node-test" :port p :bind "127.0.0.1"
                 :tick-ms 100000   ; long enough that no tick fires mid-test
                 :data-dir d}))
 
 (defn- GET [p path]
   (-> (js/fetch (str "http://127.0.0.1:" p path)) (.then #(.json %))))
+
+(defn- GET-with-status [p route]
+  (-> (js/fetch (str "http://127.0.0.1:" p route))
+      (.then (fn [res]
+               (-> (.json res)
+                   (.then (fn [body] [(.-status res) body])))))))
 
 (defn- POST [p path body]
   (-> (js/fetch (str "http://127.0.0.1:" p path)
@@ -57,6 +64,22 @@
   {"v" "inga.head/v1" "ref" ref "seq" seq' "cid" cid "prev" nil "height" nil})
 
 (defn- once [done] (let [f (atom false)] (fn [] (when-not @f (reset! f true) (done)))))
+
+(deftest enabling-a-complete-archive-after-a-bounded-snapshot-refuses
+  (let [d (tmp)
+        seed (ident/ensure-seed! d)
+        opts {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
+              :quorum 3 :chain-id "inga-node-test" :hash-fn seams/hash-fn
+              :sign-fn (seams/sign-fn seed) :verify-fn (seams/verify-fn {})}
+        snap (assoc (r/snapshot (r/replica opts))
+                    :committed [{:inga.block/height 7 :inga.block/proposals []}])]
+    (store/write-snapshot! d snap)
+    (is (thrown? js/Error
+          (node/start! {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
+                        :peers {} :pubkeys {} :seed-hex seed
+                        :chain-id "inga-node-test" :port 0 :tick-ms 100000
+                        :data-dir d :archive-finalized? true}))
+        "turning on the archive after history was pruned cannot fabricate genesis")))
 
 (deftest a-restart-keeps-the-submitted-work
   (testing "the property that replaces the Durable Object: it comes back"
@@ -157,12 +180,88 @@
                    (done)))
           (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (done)))))))
 
+(declare boot-captured)
+
+(deftest current-ref-signs-the-local-head-and-binds-the-client-challenge
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 9)
+          seed (.toString (crypto/randomBytes 32) "hex")
+          n (boot-captured d (atom []) seed p)
+          challenge "nonce-123456789abc"
+          route (str "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=" challenge)]
+      (-> (GET p route)
+          (.then (fn [js-response]
+                   (let [response (js->clj js-response :keywordize-keys true)
+                         verifier (seams/verify-fn
+                                   {"w2" (seams/public-hex (:test-seed n))})]
+                     (is (= "inga.current-ref-read/v1" (:version response)))
+                     (is (= "w2" (:witness response)))
+                     (is (= "durability-test" (:chain-id response)))
+                     (is (= "awai/app/test/stable" (:ref response)))
+                     (is (= challenge (:challenge response)))
+                     (is (nil? (:head response)))
+                     (is (true? (verifier "w2" (current-ref-read/payload response)
+                                          (:signature response))))
+                     (is (false? (verifier "w2"
+                                           (current-ref-read/payload
+                                            (assoc response :challenge "other-nonce-123456"))
+                                           (:signature response))))
+                     ((:stop! n))
+                     (done))))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
+(deftest current-ref-does-not-sign-a-head-without-its-commitment-proof
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 10) n (boot d p)]
+      (store/sink-blocks!
+       d [{:inga.block/proposals
+           [(js/JSON.stringify (clj->js (rec "awai/app/test/stable" 0 "cid-a")))]}])
+      (-> (GET-with-status
+           p "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=nonce-123456789abc")
+          (.then (fn [[status body]]
+                   (is (= 503 status))
+                   (is (false? (aget body "ok")))
+                   (is (= "current ref proof unavailable" (aget body "error")))
+                   ((:stop! n))
+                   (done)))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
+(deftest current-ref-rejects-ambiguous-or-extended-queries
+  (async raw-done
+    (let [done (once raw-done)
+          d (tmp) p (port 11) n (boot d p)
+          duplicate "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&ref=other&challenge=nonce-123456789abc"
+          extra "/current-ref?ref=awai%2Fapp%2Ftest%2Fstable&challenge=nonce-123456789abc&extra=1"]
+      (-> (GET-with-status p duplicate)
+          (.then (fn [[status body]]
+                   (is (= 400 status))
+                   (is (= "exactly one ref and challenge required" (aget body "error")))
+                   (GET-with-status p extra)))
+          (.then (fn [[status body]]
+                   (is (= 400 status))
+                   (is (= "exactly one ref and challenge required" (aget body "error")))
+                   ((:stop! n))
+                   (done)))
+          (.catch (fn [e]
+                    (is false (str "threw: " (or (.-message e) e)))
+                    ((:stop! n))
+                    (done)))))))
+
 ;; Tests call the actual advance! closure returned by start!, using the real
 ;; signed replica transition. Only transport delivery and failure injection
 ;; are replaced. No network peer, credential store, or funds are involved.
 (defn- boot-captured
-  ([d sent] (boot-captured d sent (.toString (crypto/randomBytes 32) "hex")))
-  ([d sent seed]
+  ([d sent] (boot-captured d sent (.toString (crypto/randomBytes 32) "hex") 0))
+  ([d sent seed] (boot-captured d sent seed 0))
+  ([d sent seed p]
     (with-redefs [nws/make-node
                   (fn [_] {:tick! (fn []) :close-all! (fn [])
                            :broadcast! (fn [msg]
@@ -172,7 +271,7 @@
                                          (swap! sent conj msg))})]
       (assoc (node/start! {:witness "w2" :witnesses ["w1" "w2" "w3" "w4"]
                     :peers {} :pubkeys {"w2" (seams/public-hex seed)}
-                    :seed-hex seed :chain-id "durability-test" :port 0
+                    :seed-hex seed :chain-id "durability-test" :port p :bind "127.0.0.1"
                     :tick-ms 100000 :data-dir d}) :test-seed seed))))
 
 (deftest persist-failure-emits-zero-votes-and-poisons-instance
@@ -185,6 +284,28 @@
       (is (thrown? js/Error ((:advance! n) #(r/start % 0))))
       (is (empty? @sent))
       (finally ((:stop! n))))))
+
+(deftest unchanged-working-state-skips-fsync-but-vote-watermark-survives-restart
+  (let [d (tmp) sent (atom []) n (boot-captured d sent)
+        write! store/write-snapshot! writes (atom 0)]
+    (try
+      ((:advance! n) #(r/start % 0))
+      (with-redefs [store/write-snapshot! (fn [dir snapshot]
+                                           (swap! writes inc)
+                                           (write! dir snapshot))]
+        (dotimes [_ 200]
+          ((:advance! n) (fn [s] [s []])))
+        (is (= 0 @writes) "unchanged network work must not fsync a duplicate snapshot")
+        ((:advance! n) (fn [s] [(r/with-voted-view s 9) []]))
+        (is (= 1 @writes) "a signing watermark must still be durable")
+        ((:advance! n) (fn [s] [(r/with-voted-view s 9) []]))
+        (is (= 1 @writes) "repeating the same watermark is not another write"))
+      (is (= 9 (:voted-view (store/read-snapshot d))))
+      (finally ((:stop! n))))
+    (let [resumed (boot-captured d (atom []) (:test-seed n))]
+      (try
+        (is (= 9 (r/voted-view @(:state resumed))))
+        (finally ((:stop! resumed)))))))
 
 (deftest persisted-vote-survives-stop-before-and-after-shipping
   (doseq [crash-before-ship? [true false]]
@@ -232,3 +353,38 @@
                      (is (= before (fs/readFileSync (store/snapshot-path d) "utf8")))))
             (.catch (fn [e] (is false (str e))))
             (.finally (fn [] ((:stop! n)) (done))))))))
+
+(deftest a-lock-conflicting-with-a-committed-block-fails-closed
+  (let [d (tmp) sent (atom []) n (boot-captured d sent)
+        original @(:state n)
+        committed (r/tip original)
+        bad (-> original
+                (assoc :committed [committed])
+                (assoc-in [:pm :locked-qc]
+                          {:inga.qc/height (:inga.block/height committed)
+                           :inga.qc/block-hash "conflicting-certified-fork"}))]
+    (try
+      (store/write-snapshot! d (r/snapshot original))
+      (let [before (fs/readFileSync (store/snapshot-path d) "utf8")]
+      (is (= (:inga.block/height committed)
+             (:height (node/committed-lock-conflict bad))))
+      (is (= (seams/hash-fn committed)
+             (:committed-hash (node/committed-lock-conflict bad))))
+      (is (nil? (node/committed-lock-conflict original)))
+      (let [error (try ((:advance! n) (fn [_] [bad [{:to :all :msg {:type :vote}}]]))
+                       nil
+                       (catch :default e e))]
+        (is (some? error))
+        (is (str/includes? (.-message error) "lock conflicts with committed block")))
+      (is (= before (fs/readFileSync (store/snapshot-path d) "utf8"))
+          "the conflicting state was not made durable")
+      (is (empty? @sent) "no vote escaped the safety refusal")
+      (is (thrown? js/Error ((:advance! n) (fn [s] [s []])))
+          "a poisoned process cannot resume signing"))
+      (finally ((:stop! n))))
+    (store/write-snapshot! d (r/snapshot bad))
+    (let [error (try (boot-captured d (atom []) (:test-seed n))
+                     nil
+                     (catch :default e e))]
+      (is (some? error) "a restart must refuse the same conflicting durable state")
+      (is (str/includes? (.-message error) "lock conflicts with committed block")))))

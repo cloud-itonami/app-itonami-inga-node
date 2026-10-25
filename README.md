@@ -46,8 +46,12 @@ INGA_WITNESS=w1 INGA_WITNESSES=w1,w2,w3,w4,w5,w6,w7 \
 INGA_PEERS='w2=ws://judah:19402,w3=ws://levi:19403,...' \
 INGA_PUBKEYS='w2=<hex>,w3=<hex>,...' \
 INGA_PORT=19401 INGA_TICK_MS=1000 INGA_NODE_DATA=~/.inga/w1 \
-nbb --classpath "src:../inga/src" script/run.cljk
+kbb --backend sci --classpath "src:../inga/src" script/run.cljk
 ```
+
+Set `INGA_BIND` to a local tailnet address when the witness host also has a
+public network interface. The HTTP and WebSocket listener then use that
+address only. Omit it to preserve the existing all-interface behavior.
 
 `INGA_PRINT_PUBKEY=1` mints the seed if absent, prints `w1=<hex>` and exits —
 the bootstrap step, run once per node, whose output is public.
@@ -56,14 +60,50 @@ the bootstrap step, run once per node, whose output is public.
 |---|---|
 | `GET /health` | height, committed height, view, pending, peers, and which step of a round is missing |
 | `GET /committed[?ref=]` | how many records the durable log holds; the head for a ref |
+| `GET /current-ref?ref=<ref>&challenge=<nonce>` | one witness's signed current head observation and commitment-proof sidecar; rejects missing/ambiguous parameters, but is not a quorum or finality proof |
 | `POST /submit` | `{"record": {...}}` into this witness's pending |
+
+### Who may write a ref, and which pages may read
+
+Both are opt-in. A node that sets neither behaves exactly as before.
+
+**`INGA_WRITER_POLICY=<path.edn>`**: which writers may advance which refs
+(`inga.writer`). The file maps a ref, or a prefix ending in `/`, to the
+did:keys allowed on it:
+
+```edn
+{"wallet/"        #{"did:key:z6Mk…"}
+ "yataverse/lake" {"writers" #{"did:key:z6Mk…"} "from_seq" 12}}
+```
+
+A record on a covered ref must carry `writer` (an Ed25519 did:key in the
+set) and `sig`. `sig` is the base64 Ed25519 signature over
+`inga.writer/signing-text`, which covers the chain id and every field. A
+record that fails is still ordered, because `/submit` does not judge, but it
+never takes a sequence. The first admitted record at that sequence wins.
+Refs that the policy does not cover stay open.
+
+**`INGA_CORS_ORIGINS=*` or `https://a.example,http://localhost:5178`**:
+browser origins that may READ replies (`inga-node.cors`). An exact list
+echoes the requesting origin with `Vary: Origin`. Preflight `OPTIONS` gets
+`204`, plus the Private Network Access grant when a public page asks to reach
+a LAN or tailnet node. Credentials are never allowed: the node has no
+sessions. CORS does not decide who may write; that is the writer policy's job.
+An entry that is not `scheme://host[:port]` stops startup instead of being
+silently ignored.
+
+Measured 2026-10-13 against a 4-witness devnet with both set: an unsigned
+record and one validly signed by a did:key outside the policy were both
+committed to blocks and became the head nowhere. A kotoba-lang/app-wallet
+browser build then read `/health`, and committed seq 0 of the same ref.
+Without CORS it had only seen `Failed to fetch`.
 
 ## The devnet, and what it currently proves
 
 ```bash
-nbb --classpath "src:../inga/src" script/devnet.cljk      # 7 processes, one gets killed
-SKIP_KILL=1 nbb --classpath "src:../inga/src" script/devnet.cljk
-N=4 nbb --classpath "src:../inga/src" script/devnet.cljk
+kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk      # 7 processes, one gets killed
+SKIP_KILL=1 kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk
+N=4 kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk
 ```
 
 **The default run passes** (measured 2026-08-11, against `inga` at
@@ -124,7 +164,7 @@ restated.
 The proof's format lives in its own portable `inga_node.proof` — the store is
 `.cljs` because it is a filesystem, and a `.cljc` namespace that requires a
 ClojureScript one is portable in name only. clj-kondo said so before a
-consumer did; `clojure -M -e \"(require 'inga-node.ref)\"` on a JVM is the
+consumer did; `kbb -M -e \"(require 'inga-node.ref)\"` on a JVM is the
 check that it is not just quiet.
 
 `ref_test` drives it over the **real bytes**: `store/sink-blocks!` writes the
@@ -148,7 +188,7 @@ the answer read from a **third** that received neither.
 ```bash
 npm install
 INGA_CP="src:<inga>/src:<kotobase-storage>/src" \
-  nbb --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljk
+  kbb --backend sci --classpath "src:<inga>/src:<kotobase-storage>/src" script/ref_race.cljk
 ```
 
 The decision procedure is not reimplemented — `inga.ref/project` folds the
@@ -193,8 +233,8 @@ The script now projects the log.
 ## Standing witnesses up on a fleet
 
 ```bash
-nbb script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
-nbb script/fleet.cljk config  judah,benjamin,simeon,joseph
+kbb --backend sci script/fleet.cljk pubkeys judah,benjamin,simeon,joseph
+kbb --backend sci script/fleet.cljk config  judah,benjamin,simeon,joseph
 ```
 
 `pubkeys` mints `~/.inga/<witness>/seed` on each host if it is absent, 0600,
@@ -251,6 +291,7 @@ src/inga_node/seams.cljk     hash/sign/verify over node:crypto — byte-identica
 src/inga_node/store.cljk     snapshot (private, bounded) + committed log
                              (shared, one file per (ref, seq), first write wins)
 src/inga_node/node.cljk      the wiring: sockets, clock, HTTP
+src/inga_node/cors.cljk      which browser origins may read replies (opt-in)
 script/run.cljk              one witness from the environment
 script/devnet.cljk           seven processes and a kill
 ```
@@ -259,7 +300,7 @@ script/devnet.cljk           seven processes and a kill
 
 ```bash
 INGA_SRC=../inga/src npm test          # 20 unit tests, ~2s
-nbb --classpath "src:../inga/src" script/devnet.cljk   # 7 processes, ~1min
+kbb --backend sci --classpath "src:../inga/src" script/devnet.cljk   # 7 processes, ~1min
 ```
 
 The unit suite covers the three pieces that REPLACE the Durable Object —
@@ -296,6 +337,56 @@ captured locally. These are deterministic crash-boundary tests, not power-loss
 or multi-host network qualification. All keys in tests are newly generated.
 
 ### Finalized-prefix archive (bounded qualification implementation)
+
+For a **new chain only**, `INGA_ARCHIVE_FINALIZED=1` also saves every
+finalized block and its observed QC under `INGA_NODE_DATA/finalized-blocks/`.
+Startup refuses a missing, gapped, or corrupt committed archive; turning this
+on after a bounded snapshot already exists therefore refuses.
+If a restart interrupts an append after the last durable snapshot, startup
+first verifies every archived block through that snapshot. It then moves only
+a contiguous suffix of at most 256 later files, highest first, to a fsynced
+`finalized-ahead-*` directory beside the archive. It preserves their bytes,
+including a possible zero-byte final file, and resumes from the durable
+snapshot. Missing or changed blocks at or below the snapshot, a gap in the
+suffix, an unexpected filename, or a missing snapshot still refuses startup.
+This relies on the existing order: archive and snapshot durability complete
+before any vote or output is shipped, with one process owning the witness key.
+`INGA_ARCHIVE_HTTP=1` additionally enables `GET /local-finalized-prefix`.
+That route joins the complete local archive with the replica's live tail,
+selects a certified tip, and checks signatures and finality before returning
+an EDN proof. It refuses incomplete or oversized proofs. The caller must
+verify against its own trusted genesis and validator set; this endpoint is
+evidence, not writer permission. The opt-in is off for existing chains.
+The local archive is one host's custody and is not yet replicated to IPFS or
+qualified for a long outage. Its 8192-block/8 MiB response bound is a
+qualification ceiling, not a scalable state-root checkpoint.
+
+The same opt-in also serves bounded, height-addressed evidence:
+
+- `GET /local-finalized-checkpoint` returns EDN with `:chain-id`, a fixed
+  `:committed-height`, the archived block at that height, its two direct
+  descendants, and the last block's QC. It returns 503 until that certified
+  three-block window is available.
+- `GET /local-finalized-range?from=0&limit=128` returns at most 128 archived
+  blocks as EDN with `:chain-id`, `:from`, and `:to`. A reader requests every
+  height from zero through the checkpoint's `:committed-height`, in order.
+  Invalid requests return 400, heights beyond the fixed checkpoint return
+  416, and damaged custody returns 503. Each response is limited to 8 MiB.
+
+A reader starts with its own trusted empty genesis, ordered validator keys,
+quorum, and chain ID. It verifies each page's heights, hashes, direct parent
+links, proposer order, and parent QCs using `inga.sync/validate-segment`,
+retaining the last block as the next page's anchor. It must reject a gap,
+overlap, changed checkpoint anchor, wrong chain ID, or an invalid signature.
+After the page ending at the checkpoint height, it verifies the checkpoint's
+three blocks agree with that last archived block, validates its two descendants
+and signed tip QC, then applies the three-chain rule. The checkpoint response
+alone is insufficient: the server's claimed height and hash are untrusted.
+Pages allow reading beyond the old 8192-block *response* limit without an
+unbounded HTTP body. This release provides the producer endpoints; it does not
+yet include a streaming external verifier or a compact trusted state root.
+Reading and verifying from genesis remains O(history). The local archive is
+still one host's custody until replicated and independently read back.
 
 `inga-node.archive` persists a complete prefix and its tip QC as one raw
 CIDv1/sha2-256 EDN bundle on **https://kotobase.net/ipld/:cid**, using the

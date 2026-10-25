@@ -1,6 +1,6 @@
 (ns inga-node.archive-test
-  (:require [clojure.test :refer [deftest is async]]
-            [clojure.edn :as edn]
+  (:require [kotoba.test :refer [deftest is async]]
+            [kotoba.lang.edn :as edn]
             [inga-node.archive :as archive]
             [inga-node.node :as node]
             [inga.reservation-test :as fixture]

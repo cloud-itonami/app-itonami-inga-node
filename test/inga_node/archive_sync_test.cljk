@@ -1,0 +1,48 @@
+(ns inga-node.archive-sync-test
+  (:require [kotoba.test :refer [deftest is]]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            [inga-node.node :as node]
+            [inga-node.store :as store]
+            [inga-node.seams :as seams]))
+
+(defn- sample []
+  (let [d (fs/mkdtempSync (path/join (os/tmpdir) "inga-archive-sync-"))
+        g {:inga.block/height 0 :inga.block/parent-hash "genesis"
+           :inga.block/proposals []}
+        b1 {:inga.block/height 1 :inga.block/parent-hash (seams/hash-fn g)
+            :inga.block/proposals []}
+        b2 {:inga.block/height 2 :inga.block/parent-hash (seams/hash-fn b1)
+            :inga.block/proposals []}
+        state {:committed [b2] :hash-fn seams/hash-fn}]
+    (store/append-finalized! d [g b1 b2] {} seams/hash-fn)
+    {:dir d :blocks [g b1 b2] :state state}))
+
+(deftest an-archive-serves-a-bounded-certified-target-and-generic-catchup
+  (let [{:keys [dir blocks state]} (sample)
+        [_ b1 b2] blocks
+        hash (seams/hash-fn b2)
+        targeted (node/archive-sync-response
+                  dir state {:type :sync-request :from 1 :to 2
+                             :target-hash hash})
+        generic (node/archive-sync-response
+                 dir state {:type :sync-request :from 1 :to 1000})]
+    (is (= {:type :sync-response :blocks [b1 b2] :target-hash hash} targeted))
+    (is (= {:type :sync-response :blocks [b1 b2]} generic))
+    (is (nil? (node/archive-sync-response
+               dir state {:type :sync-request :from 1 :to 2
+                          :target-hash "different-branch"})))
+    (is (nil? (node/archive-sync-response
+               dir state {:type :sync-request :from 1 :to 300
+                          :target-hash hash})))
+    (is (nil? (store/finalized-range dir 0 2 2 seams/hash-fn 2)))))
+
+(deftest a-corrupt-archived-branch-cannot-be-served
+  (let [{:keys [dir state]} (sample)
+        file (path/join dir "finalized-blocks" "000000000001.edn")]
+    (fs/writeFileSync file "{:block {:inga.block/height 1} :hash \"forged\"}" "utf8")
+    (is (thrown? js/Error
+                 (node/archive-sync-response
+                  dir state {:type :sync-request :from 1 :to 2}))
+        "the read path must recheck bytes that changed after startup")))

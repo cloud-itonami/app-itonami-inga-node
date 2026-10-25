@@ -1,7 +1,8 @@
 (ns inga-node.store-test
   "The disk. This is the half a Durable Object was being used for, so it is
   the half that has to survive the process it belongs to."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
+            [kotoba.lang.edn :as edn]
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
@@ -42,6 +43,103 @@
     (store/write-snapshot! d {:a 1})
     (is (= #{"snapshot.edn"} (set (fs/readdirSync d)))
         "a rename that left its temp file would grow the data dir forever")))
+
+(deftest finalized-archive-starts-at-genesis-and-survives-restart
+  (let [d (tmp)
+        genesis {:inga.block/height 0 :inga.block/parent-hash nil :inga.block/proposals []}
+        b1 {:inga.block/height 1 :inga.block/parent-hash (seams/hash-fn genesis)
+            :inga.block/proposals []}
+        h1 (seams/hash-fn b1)]
+    (store/append-finalized! d [genesis b1] {} seams/hash-fn)
+    (is (= 1 (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn)))
+    (is (nil? (:qc (edn/read-string
+                   (fs/readFileSync (path/join d "finalized-blocks" "000000000001.edn") "utf8"))))
+        "a synced finalized block can be archived before its own QC arrives")
+    (is (= 2 (count (fs/readdirSync (path/join d "finalized-blocks")))))
+    (is (thrown? js/Error
+          (store/append-finalized! d
+                                   [{:inga.block/height 2
+                                     :inga.block/parent-hash h1
+                                     :inga.block/proposals []}]
+                                   {(seams/hash-fn {:inga.block/height 2
+                                                    :inga.block/parent-hash h1
+                                                    :inga.block/proposals []})
+                                    {:inga.qc/block-hash "wrong"}}
+                                   seams/hash-fn))
+        "an available but mismatched QC still refuses")
+    (let [b2 {:inga.block/height 2 :inga.block/parent-hash h1 :inga.block/proposals []}
+          b3 {:inga.block/height 3 :inga.block/parent-hash (seams/hash-fn b2)
+              :inga.block/proposals []}
+          h3 (seams/hash-fn b3)
+          state {:committed [b1] :chain [genesis b1 b2 b3]
+                 :qcs {h3 {:inga.qc/block-hash h3}} :hash-fn seams/hash-fn}]
+      (is (= [genesis b1 b2 b3]
+             (:blocks (store/finalized-prefix d state 8))))
+      (is (thrown? js/Error (store/finalized-prefix d state 2))
+          "a bounded response cannot silently omit genesis"))
+    (is (thrown? js/Error
+          (store/append-finalized! d [{:inga.block/height 2
+                                       :inga.block/parent-hash "wrong-parent"}]
+                                   {} seams/hash-fn))
+        "a gap or fork cannot extend the archive")
+    (is (= 2 (count (fs/readdirSync (path/join d "finalized-blocks")))))
+    (fs/writeFileSync (path/join d "finalized-blocks" "000000000001.edn") "{:truncated true}" "utf8")
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn))
+        "a corrupt archived block cannot become a healthy restart")))
+
+(deftest finalized-archive-refuses-a-late-opt-in
+  (let [d (tmp)
+        b {:inga.block/height 7 :inga.block/proposals []}]
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b]} seams/hash-fn))
+        "a bounded old snapshot cannot be called a complete prefix")
+    (is (= -1 (store/verify-finalized-archive! d {:committed []} seams/hash-fn)))))
+
+(deftest restart-preserves-only-a-contiguous-suffix-ahead-of-durable-snapshot
+  (let [d (tmp)
+        genesis {:inga.block/height 0 :inga.block/parent-hash nil :inga.block/proposals []}
+        b1 {:inga.block/height 1 :inga.block/parent-hash (seams/hash-fn genesis)
+            :inga.block/proposals []}
+        b2 {:inga.block/height 2 :inga.block/parent-hash (seams/hash-fn b1)
+            :inga.block/proposals []}
+        archive (path/join d "finalized-blocks")]
+    (store/append-finalized! d [genesis b1 b2] {} seams/hash-fn)
+    (fs/writeFileSync (path/join archive "000000000003.edn") "" "utf8")
+    (is (= 1 (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn)))
+    (is (= #{"000000000000.edn" "000000000001.edn"}
+           (set (fs/readdirSync archive))))
+    (let [quarantines (filter #(.startsWith % "finalized-ahead-")
+                              (fs/readdirSync d))]
+      (is (= 1 (count quarantines)))
+      (is (= #{"000000000002.edn" "000000000003.edn"}
+             (set (fs/readdirSync (path/join d (first quarantines))))))
+      (is (= 0 (.-size (fs/statSync
+                       (path/join d (first quarantines) "000000000003.edn"))))))
+    (is (= 1 (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn))
+        "a second restart sees the exact durable archive")
+    (store/append-finalized! d [b2] {} seams/hash-fn)
+    (is (= 2 (store/verify-finalized-archive! d {:committed [b2]} seams/hash-fn)))
+    (is (thrown? js/Error (store/verify-finalized-archive! d nil seams/hash-fn))
+        "a missing snapshot must never turn old key use into fresh genesis")))
+
+(deftest archive-recovery-refuses-gaps-and-committed-corruption
+  (let [d (tmp)
+        genesis {:inga.block/height 0 :inga.block/parent-hash nil :inga.block/proposals []}
+        b1 {:inga.block/height 1 :inga.block/parent-hash (seams/hash-fn genesis)
+            :inga.block/proposals []}
+        archive (path/join d "finalized-blocks")]
+    (store/append-finalized! d [genesis b1] {} seams/hash-fn)
+    (fs/writeFileSync (path/join archive "000000000003.edn") "" "utf8")
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn))
+        "an ahead suffix starting after a gap cannot be guessed")
+    (is (not-any? #(.startsWith % "finalized-ahead-") (fs/readdirSync d)))
+    (fs/unlinkSync (path/join archive "000000000003.edn"))
+    (fs/writeFileSync (path/join archive "000000000001.edn") "{:truncated true}" "utf8")
+    (is (thrown? js/Error
+          (store/verify-finalized-archive! d {:committed [b1]} seams/hash-fn))
+        "damage at the committed height still refuses")))
 
 ;; ── the committed log ───────────────────────────────────────────────────────
 

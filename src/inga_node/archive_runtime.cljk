@@ -1,7 +1,7 @@
 (ns inga-node.archive-runtime
   "Optional bounded archive lifecycle. No key discovery, no snapshot edits.
   A checkpoint is announced only after remote verification and local fsync."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [inga-node.archive :as archive]
             ["node:fs" :as fs]
             ["node:path" :as path]))

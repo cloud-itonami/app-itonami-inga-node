@@ -1,6 +1,6 @@
 (ns inga-node.archive-runtime-test
-  (:require [clojure.test :refer [deftest is async]]
-            [clojure.edn :as edn]
+  (:require [kotoba.test :refer [deftest is async]]
+            [kotoba.lang.edn :as edn]
             [promesa.core :as p]
             [inga-node.archive-runtime :as runtime]
             [inga-node.runtime :as startup]

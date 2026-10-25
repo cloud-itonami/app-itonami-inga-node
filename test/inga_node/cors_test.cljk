@@ -1,0 +1,110 @@
+(ns inga-node.cors-test
+  "CORS: the pure decision, then a real node answering a browser-shaped
+  request. `node:http` rather than fetch, so the Origin header is sent exactly
+  as written instead of as whatever the client library decides an Origin is."
+  (:require [kotoba.test :refer [deftest is testing async]]
+            ["node:fs" :as fs]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            ["node:http" :as http]
+            [inga-node.cors :as cors]
+            [inga-node.identity :as ident]
+            [inga-node.node :as node]))
+
+(deftest origins-are-parsed-strictly
+  (is (nil? (cors/parse-origins nil)) "unset is off")
+  (is (nil? (cors/parse-origins "  ")) "blank is off")
+  (is (= :any (cors/parse-origins "*")))
+  (is (= #{"https://wallet.example" "http://localhost:5178"}
+         (cors/parse-origins " https://wallet.example , http://localhost:5178 ")))
+  (is (= #{"http://[::1]:8080"} (cors/parse-origins "http://[::1]:8080")))
+  (doseq [bad ["https://wallet.example/" "https://wallet.example/app" "wallet.example" "ftp://x" "https://a.example?x=1"]]
+    (is (thrown? js/Error (cors/parse-origins bad)) (str "refused at startup: " bad))))
+
+(deftest headers-echo-only-an-allowed-origin
+  (let [allowed #{"https://wallet.example"}]
+    (is (= {"Access-Control-Allow-Origin" "https://wallet.example" "Vary" "Origin"}
+           (cors/headers allowed "https://wallet.example")))
+    (is (nil? (cors/headers allowed "https://evil.example")))
+    (is (nil? (cors/headers allowed nil)) "no Origin header: not a CORS request")
+    (is (nil? (cors/headers nil "https://wallet.example")) "off means off")
+    (is (= {"Access-Control-Allow-Origin" "*"} (cors/headers :any "https://anything.example"))
+        "* needs no Vary: the answer does not depend on the origin")
+    (testing "preflight grants methods and headers; private network only when asked"
+      (let [h (cors/headers allowed "https://wallet.example" {:private-network? false})]
+        (is (= "GET, POST, OPTIONS" (get h "Access-Control-Allow-Methods")))
+        (is (= "content-type" (get h "Access-Control-Allow-Headers")))
+        (is (nil? (get h "Access-Control-Allow-Private-Network"))))
+      (is (= "true" (get (cors/headers allowed "https://wallet.example" {:private-network? true})
+                         "Access-Control-Allow-Private-Network"))))
+    (is (not-any? #(= "Access-Control-Allow-Credentials" %) (keys (cors/headers :any "https://x.example" {})))
+        "never credentials: the node has no sessions to share")))
+
+;; ── over a real socket ──────────────────────────────────────────────────
+
+(def ^:private base-port (+ 24000 (mod (.-pid js/process) 3000)))
+(defn- tmp [] (fs/mkdtempSync (path/join (os/tmpdir) "inga-node-cors-")))
+
+(defn- boot [p origins]
+  (let [d (tmp)]
+    (node/start! {:witness "w1" :witnesses ["w1" "w2" "w3" "w4"]
+                  :peers {} :pubkeys {} :seed-hex (ident/ensure-seed! d)
+                  :chain-id "inga-cors-test" :port p :bind "127.0.0.1"
+                  :tick-ms 100000 :data-dir d :cors-origins origins})))
+
+(defn- req
+  "[status headers] for `method path` with `headers`."
+  [p method path headers]
+  (js/Promise.
+   (fn [resolve reject]
+     (let [r (http/request #js {:host "127.0.0.1" :port p :method method :path path
+                                :headers (clj->js headers)}
+                           (fn [res] (.resume res) (.on res "end" #(resolve [(.-statusCode res) (js->clj (.-headers res))]))))]
+       (.on r "error" reject)
+       (.end r)))))
+
+(defn- once [done] (let [f (atom false)] (fn [] (when-not @f (reset! f true) (done)))))
+
+(deftest a-node-with-origins-answers-the-browser
+  (async raw-done
+    (let [done (once raw-done)
+          p (+ base-port 1)
+          n (boot p (cors/parse-origins "https://wallet.example"))
+          stop! (fn [] ((:stop! n)) (done))]
+      (-> (req p "GET" "/health" {"origin" "https://wallet.example"})
+          (.then (fn [[status h]]
+                   (is (= 200 status))
+                   (is (= "https://wallet.example" (get h "access-control-allow-origin")))
+                   (is (= "Origin" (get h "vary")))
+                   (req p "GET" "/committed?ref=x" {"origin" "https://evil.example"})))
+          (.then (fn [[status h]]
+                   (is (= 200 status) "the request still succeeds; the browser just may not read it")
+                   (is (nil? (get h "access-control-allow-origin")))
+                   (req p "OPTIONS" "/submit" {"origin" "https://wallet.example"
+                                               "access-control-request-method" "POST"
+                                               "access-control-request-headers" "content-type"
+                                               "access-control-request-private-network" "true"})))
+          (.then (fn [[status h]]
+                   (is (= 204 status) "preflight answered, not routed as a 404")
+                   (is (= "https://wallet.example" (get h "access-control-allow-origin")))
+                   (is (= "GET, POST, OPTIONS" (get h "access-control-allow-methods")))
+                   (is (= "content-type" (get h "access-control-allow-headers")))
+                   (is (= "true" (get h "access-control-allow-private-network")))
+                   (stop!)))
+          (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (stop!)))))))
+
+(deftest a-node-without-origins-is-unchanged
+  (async raw-done
+    (let [done (once raw-done)
+          p (+ base-port 2)
+          n (boot p nil)
+          stop! (fn [] ((:stop! n)) (done))]
+      (-> (req p "GET" "/health" {"origin" "https://wallet.example"})
+          (.then (fn [[status h]]
+                   (is (= 200 status))
+                   (is (nil? (get h "access-control-allow-origin")) "off unless configured")
+                   (req p "OPTIONS" "/submit" {"origin" "https://wallet.example"})))
+          (.then (fn [[status _]]
+                   (is (= 404 status) "no preflight handling either: exactly the old behaviour")
+                   (stop!)))
+          (.catch (fn [e] (is false (str "threw: " (or (.-message e) e))) (stop!)))))))

@@ -1,6 +1,6 @@
 ;; Two writers, one ref, one sequence. Real witnesses, real OS processes.
 ;;
-;;   nbb --classpath "src:<inga>/src" script/ref_race.cljk
+;;   kbb --backend sci --classpath "src:<inga>/src" script/ref_race.cljk
 ;;
 ;; `inga`'s own `ref_test` proves the adapter refuses a second writer, but its
 ;; `propose!` is a cooperative oracle in the same process: it is told who won.
