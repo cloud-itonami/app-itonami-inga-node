@@ -16,8 +16,10 @@
             [inga.writer :as writer]
             [inga-node.cors :as cors]
             [inga-node.identity :as ident]
-            [inga-node.node :as node]
-            [inga-node.seams :as seams]))
+            [inga-node.runtime :as runtime]
+            [inga-node.seams :as seams]
+            ["node:child_process" :as process]
+            ["node:path" :as path]))
 
 (def ^:private fs (js/require "node:fs"))
 
@@ -64,7 +66,7 @@
     (when (= "1" (env "INGA_PRINT_PUBKEY" ""))
       (println (str witness "=" (ident/public-hex seed-hex)))
       (js/process.exit 0))
-    (node/start!
+    (runtime/start!
      {:witness witness
       :witnesses witnesses
       :peers (pairs (env "INGA_PEERS" ""))
@@ -79,6 +81,25 @@
       :archive-http? (= "1" (env "INGA_ARCHIVE_HTTP" ""))
       :writer-admit? (writer-admit (env "INGA_WRITER_POLICY" nil) (env "INGA_CHAIN_ID" "inga-fleet-1"))
       :cors-origins (cors/parse-origins (env "INGA_CORS_ORIGINS" nil))
-      :data-dir data-dir})))
+      :data-dir data-dir
+      :archive (when (= "1" (env "INGA_ARCHIVE_ENABLED" "0"))
+                 (let [authorizer (env "INGA_ARCHIVE_AUTHORIZER" nil)]
+                   (when-not (and authorizer (path/isAbsolute authorizer))
+                     (throw (ex-info "INGA_ARCHIVE_AUTHORIZER must be an absolute executable path" {})))
+                   {:interval-ms (js/parseInt (env "INGA_ARCHIVE_INTERVAL_MS" "1000") 10)
+                    ;; Explicit operator-supplied fresh-per-PUT signer. No shell,
+                    ;; shared-key discovery, token reuse or witness-key access.
+                    :authorization (fn []
+                                     (let [value (str/trim (process/execFileSync authorizer #js []
+                                                             #js {:encoding "utf8" :timeout 10000 :maxBuffer 65536
+                                                                  :stdio #js ["ignore" "pipe" "ignore"]}))]
+                                       (when (str/blank? value)
+                                         (throw (ex-info "empty archive authorization" {})))
+                                       value))}))})))
 
-(-main)
+(-> (js/Promise.resolve nil)
+    (.then (fn [_] (-main)))
+    (.catch (fn [e]
+              (js/console.error "inga-node startup failed; check durable state and explicit configuration")
+              (js/console.error (str e))
+              (js/process.exit 1))))

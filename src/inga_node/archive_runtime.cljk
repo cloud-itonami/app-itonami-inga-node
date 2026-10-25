@@ -1,0 +1,97 @@
+(ns inga-node.archive-runtime
+  "Optional bounded archive lifecycle. No key discovery, no snapshot edits.
+  A checkpoint is announced only after remote verification and local fsync."
+  (:require [kotoba.lang.edn :as edn]
+            [inga-node.archive :as archive]
+            ["node:fs" :as fs]
+            ["node:path" :as path]))
+
+(defn checkpoint-path [data-dir] (path/join data-dir "archive-checkpoint.edn"))
+
+(defn- save! [data-dir descriptor]
+  (fs/mkdirSync data-dir #js {:recursive true})
+  (let [file (checkpoint-path data-dir) tmp (str file ".tmp")
+        fd (fs/openSync tmp "w" 384)]
+    (try (fs/writeFileSync fd (pr-str descriptor) "utf8")
+         (fs/fsyncSync fd) (finally (fs/closeSync fd)))
+    (fs/renameSync tmp file)
+    (let [dir (fs/openSync data-dir "r")]
+      (try (fs/fsyncSync dir) (finally (fs/closeSync dir))))))
+
+(defn open!
+  "Restore and verify the persisted checkpoint before starting capture.
+  Returns :attach!, :capture!, :response!, :status, :stop!. Only one capture
+  may run at a time. Failures retain the last durable checkpoint. Missing
+  history, bounds, write/readback and restoration failures never grant finality.
+  A stopped controller cannot announce an in-flight result."
+  [{:keys [data-dir context authorization fetch-fn interval-ms]
+    :or {interval-ms 1000}}]
+  (-> (js/Promise.resolve nil)
+      (.then
+       (fn [_]
+         (when-not (and (pos-int? interval-ms) (ifn? authorization))
+           (throw (ex-info "archive requires explicit authorization provider and interval" {:reason :invalid-config})))
+         (let [client (archive/open {:context context :max-bytes archive/max-ipld-bytes :authorization authorization :fetch-fn fetch-fn})
+               file (checkpoint-path data-dir)
+               exists? (fs/existsSync file)
+               stored (when exists?
+                        (when (> (.-size (fs/statSync file)) 8192)
+                          (throw (ex-info "oversized archive checkpoint descriptor" {:reason :invalid-checkpoint})))
+                        (edn/read-string (fs/readFileSync file "utf8")))]
+           (when (and exists? (not (and (map? stored) (string? (:cid stored)))))
+             (throw (ex-info "invalid archive checkpoint descriptor" {:reason :invalid-checkpoint})))
+           (-> (if stored (archive/read! client (:cid stored)) (js/Promise.resolve nil))
+               (.then
+                (fn [restored]
+                  (when (and stored (not= stored (:checkpoint restored)))
+                    (throw (ex-info "archive checkpoint metadata mismatch" {:reason :invalid-checkpoint})))
+                  (let [checkpoint (atom stored) source (atom nil) timer (atom nil)
+                        stopped? (atom false) in-flight (atom nil)
+                        status (atom {:status (if stored :ready :waiting) :checkpoint stored})]
+                    (letfn [(capture! []
+                              (or @in-flight
+                                  (if (or @stopped? (nil? @source))
+                                    (js/Promise.resolve nil)
+                                    (let [s @@source
+                                          hf (:hash-fn context)
+                                          certified (last (filter #(get (:qcs s) (hf %)) (:chain s)))
+                                          tip-hash (when certified (hf certified))]
+                                      (if (= tip-hash (:tip-hash @checkpoint))
+                                        (js/Promise.resolve @checkpoint)
+                                        (let [p (-> (archive/capture! client (:cid @checkpoint) s)
+                                                    (.then (fn [descriptor]
+                                                             (when-not @stopped?
+                                                               (save! data-dir descriptor)
+                                                               (reset! checkpoint descriptor)
+                                                               (reset! status {:status :ready :checkpoint descriptor}))
+                                                             descriptor))
+                                                    (.catch (fn [e]
+                                                              (reset! status {:status :unqualified
+                                                                              :reason (archive/refusal-reason e)
+                                                                              :checkpoint @checkpoint})
+                                                              nil))
+                                                    (.finally #(reset! in-flight nil)))]
+                                          (reset! in-flight p) p))))))
+                            (stop! []
+                              (reset! stopped? true)
+                              (when @timer (js/clearInterval @timer)))]
+                      {:status status :capture! capture! :stop! stop!
+                       :attach! (fn [state]
+                                  (when (or @source @stopped?)
+                                    (throw (ex-info "archive lifecycle already attached or stopped" {})))
+                                  (reset! source state)
+                                  (reset! timer (js/setInterval capture! interval-ms))
+                                  (capture!))
+                       :response! (fn [{:keys [checkpoint] :as request}]
+                                    (let [cid (or checkpoint (when (= :ready (:status @status))
+                                                              (:cid (:checkpoint @status))))]
+                                      (if cid
+                                        (-> (archive/response! client (assoc request :checkpoint cid))
+                                            (.then (fn [r]
+                                                     ;; Latest is a moving pointer, never immutable.
+                                                     (if checkpoint r
+                                                         (assoc-in r [:headers "cache-control"] "no-store")))))
+                                        (js/Promise.resolve
+                                         {:status (if (= "GET" (:method request)) 503 405)
+                                          :headers {"content-type" "application/edn" "cache-control" "no-store"}
+                                          :body (pr-str @status)}))))}))))))))))

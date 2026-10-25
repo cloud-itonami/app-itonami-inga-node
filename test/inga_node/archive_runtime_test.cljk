@@ -1,0 +1,140 @@
+(ns inga-node.archive-runtime-test
+  (:require [kotoba.test :refer [deftest is async]]
+            [kotoba.lang.edn :as edn]
+            [promesa.core :as p]
+            [inga-node.archive-runtime :as runtime]
+            [inga-node.runtime :as startup]
+            [inga-node.archive-test :as disk]
+            [inga.reservation-test :as fixture]
+            [inga.replica :as replica]
+            ["node:fs" :as fs]))
+
+(defn state [proof]
+  {:chain-id fixture/chain-id :chain (:blocks proof)
+   :qcs {((:hash-fn fixture/context) (peek (:blocks proof))) (:tip-qc proof)}})
+(defn options [data remote calls]
+  {:data-dir data :context fixture/context :authorization (constantly "test-only")
+   :fetch-fn (disk/disk-fetch remote calls) :interval-ms 60000})
+(defn cleanup [controllers done]
+  (doseq [a @controllers] ((:stop! a)))
+  (done))
+
+(deftest checkpoint-restoration-capture-serving-and-bounded-tail
+  (async done
+    (let [data (disk/tmp) remote (disk/tmp) calls (atom [])
+          cfg (options data remote calls)
+          proof (fixture/proof [[fixture/a] [] [] [] [] [] [] [] [] [] []])
+          initial {:blocks (subvec (:blocks proof) 0 8)
+                   :tip-qc (fixture/certify (nth (:blocks proof) 7) (take 3 fixture/witnesses))}
+          controllers (atom [])]
+      (-> (p/let [a (runtime/open! cfg)
+                  _ (swap! controllers conj a)
+                  cp ((:attach! a) (atom (state initial)))
+                  r ((:response! a) {:method "GET"})]
+            (is (= 8 (:block-count cp)))
+            (is (= cp (edn/read-string (fs/readFileSync (runtime/checkpoint-path data) "utf8"))))
+            (is (= 200 (:status r)))
+            (is (= "no-store" (get-in r [:headers "cache-control"])))
+            ((:stop! a))
+            (p/let [b (runtime/open! cfg)
+                    _ (swap! controllers conj b)
+                    _ (is (= :ready (:status @(:status b))))
+                    cp2 ((:attach! b) (atom (assoc (state proof) :chain (vec (take-last replica/resume-tail (:blocks proof))))))
+                    r2 ((:response! b) {:method "GET" :checkpoint (:cid cp2)})]
+              (is (= 12 (:block-count cp2)))
+              (is (= 9 (:finalized-height cp2)))
+              (is (= proof (:proof (edn/read-string (:body r2)))))
+              (is (= "public, max-age=31536000, immutable" (get-in r2 [:headers "cache-control"])))
+              (is (every? #(.startsWith (:url %) "https://kotobase.net/ipld/") @calls))))
+          (.catch (fn [e] (is false (str e))))
+          (.finally #(cleanup controllers done))))))
+
+(deftest missing-genesis-and-bound-fail-before-put
+  (async done
+    (let [data (disk/tmp) remote (disk/tmp) calls (atom []) controllers (atom [])
+          proof (fixture/proof (repeat 12 []))
+          source (atom (assoc (state proof) :chain (vec (take-last 8 (:blocks proof)))))
+          cfg (assoc-in (options data remote calls) [:context :max-blocks] 8)]
+      (-> (p/let [a (runtime/open! cfg)
+                  _ (swap! controllers conj a)
+                  _ ((:attach! a) source)]
+            (is (= :unqualified (:status @(:status a))))
+            (is (= :wrong-genesis (:reason @(:status a))))
+            (is (empty? @calls))
+            (reset! source (state proof))
+            (p/let [_ ((:capture! a))
+                    response ((:response! a) {:method "GET"})]
+              (is (= :max-blocks-exceeded (:reason @(:status a))))
+              (is (empty? @calls))
+              (is (not (fs/existsSync (runtime/checkpoint-path data))))
+              (is (= 503 (:status response)))))
+          (.catch (fn [e] (is false (str e))))
+          (.finally #(cleanup controllers done))))))
+
+(deftest corrupt-or-missing-restoration-never-starts-fresh
+  (async done
+    (let [data (disk/tmp) remote (disk/tmp) calls (atom []) cfg (options data remote calls)]
+      (fs/writeFileSync (runtime/checkpoint-path data) "nil")
+      (-> (p/let [_ (disk/rejected (runtime/open! cfg) :invalid-checkpoint)]
+            (fs/writeFileSync (runtime/checkpoint-path data) (pr-str {:cid "bafkreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}))
+            (-> (runtime/open! cfg)
+                (.then (fn [a] ((:stop! a)) (is false "missing checkpoint was accepted")))
+                (.catch (fn [_] (is true)))))
+          (.then (fn [_] (is (not-any? #(= "PUT" (:method %)) @calls))))
+          (.catch (fn [e] (is false (str e))))
+          (.finally done)))))
+
+(deftest single-flight-and-stop-do-not-announce-unfinished-capture
+  (async done
+    (let [data (disk/tmp) remote (disk/tmp) calls (atom []) release (atom nil)
+          fetch (disk/disk-fetch remote calls)
+          cfg (assoc (options data remote calls) :fetch-fn
+                     (fn [url init]
+                       (if (= "PUT" (.-method init))
+                         (js/Promise. (fn [resolve _] (reset! release #(resolve (fetch url init)))))
+                         (fetch url init))))
+          controllers (atom []) source (atom (state (fixture/proof [[fixture/a] [] []])))]
+      (-> (p/let [a (runtime/open! cfg)
+                  _ (swap! controllers conj a)]
+            (let [pending ((:attach! a) source)]
+              (is (identical? pending ((:capture! a))))
+              (p/let [_ (p/delay 10)]
+                ((:stop! a))
+                (is (fn? @release))
+                (@release)
+                (p/let [_ pending]
+                  (is (not (fs/existsSync (runtime/checkpoint-path data))))
+                  (is (nil? (:checkpoint @(:status a))))
+                  (is (= 1 (count (filter #(= "PUT" (:method %)) @calls))))))))
+          (.catch (fn [e] (is false (str e))))
+          (.finally #(cleanup controllers done))))))
+
+(deftest official-startup-restores-and-serves-without-manual-prefix-injection
+  (async done
+    (let [data (disk/tmp) remote (disk/tmp) calls (atom []) nodes (atom [])
+          proof (fixture/proof [[fixture/a] [] []])
+          port (+ 28000 (mod (.-pid js/process) 1000))
+          cfg {:witness "w1" :witnesses fixture/witnesses :peers {}
+               :pubkeys fixture/pubkeys :seed-hex (fixture/seeds "w1")
+               :chain-id fixture/chain-id :port port :tick-ms 100000 :data-dir data
+               :archive (options data remote calls)}]
+      (-> (p/let [n (startup/start! cfg)
+                  _ (swap! nodes conj n)]
+            ;; Inject already-certified fixture history through the same
+            ;; durable transition seam used by existing node tests.
+            ((:advance! n) (fn [s] [(merge s (state proof)) []]))
+            (p/let [cp ((:capture! (:archive n)))
+                    response (js/fetch (str "http://127.0.0.1:" port "/finalized-prefix"))
+                    body (.text response)]
+              (is (= 200 (.-status response)))
+              (is (= proof (:proof (edn/read-string body))))
+              ((:stop! n))
+              (p/let [restarted (startup/start! (assoc cfg :port (inc port)))
+                      _ (swap! nodes conj restarted)
+                      response (js/fetch (str "http://127.0.0.1:" (inc port) "/finalized-prefix"))
+                      body (.text response)]
+                (is (= 200 (.-status response)))
+                (is (= (:cid cp) (get-in (edn/read-string body) [:checkpoint :cid])))
+                (is (= proof (:proof (edn/read-string body)))))))
+          (.catch (fn [e] (is false (str e))))
+          (.finally (fn [] (doseq [n @nodes] ((:stop! n))) (done)))))))
